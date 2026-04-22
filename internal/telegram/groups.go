@@ -270,49 +270,70 @@ func DeleteMyMessages(ctx context.Context, client *telegram.Client, chat ChatInf
 		defer api.AccountFinishTakeoutSession(ctx, &tg.AccountFinishTakeoutSessionRequest{Success: true})
 	}
 
-	total, err := countMessages(ctx, api, chat.InputPeer, selfID, takeoutID)
-	if err != nil {
-		progress <- DeleteProgress{Err: err}
-		return
+	// Phase 1: collect all message IDs by paginating through search with advancing offsetID.
+	// Must complete BEFORE any deletion — otherwise the search index lag after batch-delete
+	// causes the loop to exit early (server returns empty or stale results).
+	var ids []int
+	offsetID := 0
+	for {
+		rawMsgs, err := searchMessagesWithOffset(ctx, api, chat.InputPeer, selfID, takeoutID, offsetID, 100)
+		if err != nil {
+			progress <- DeleteProgress{Err: err}
+			return
+		}
+		if len(rawMsgs) == 0 {
+			break
+		}
+
+		nextOffset := offsetID
+		for _, m := range rawMsgs {
+			msg, ok := m.(*tg.Message)
+			if !ok {
+				continue
+			}
+			nextOffset = msg.ID
+			if fromID, ok := msg.GetFromID(); ok {
+				if peer, ok := fromID.(*tg.PeerUser); ok && peer.UserID != selfID {
+					continue
+				}
+			}
+			ids = append(ids, msg.ID)
+		}
+
+		progress <- DeleteProgress{Deleted: 0, Total: len(ids)}
+
+		if len(rawMsgs) < 100 {
+			break
+		}
+		if nextOffset == offsetID {
+			break // no progress, avoid infinite loop
+		}
+		offsetID = nextOffset
+		time.Sleep(200 * time.Millisecond)
 	}
+
+	total := len(ids)
 	if total == 0 {
 		progress <- DeleteProgress{Done: true}
 		return
 	}
 
+	// Phase 2: delete collected IDs in chunks of 100.
 	deleted := 0
-	for {
-		rawMsgs, err := searchMessages(ctx, api, chat.InputPeer, selfID, takeoutID, 100)
-		if err != nil {
-			progress <- DeleteProgress{Deleted: deleted, Total: total, Err: err}
-			return
+	i := 0
+	for i < total {
+		end := i + 100
+		if end > total {
+			end = total
 		}
+		chunk := ids[i:end]
 
-		if len(rawMsgs) == 0 {
-			break
-		}
-
-		ids := make([]int, 0, len(rawMsgs))
-		for _, m := range rawMsgs {
-			if msg, ok := m.(*tg.Message); ok {
-				if fromID, ok := msg.GetFromID(); ok {
-					if peer, ok := fromID.(*tg.PeerUser); ok && peer.UserID != selfID {
-						continue
-					}
-				}
-				ids = append(ids, msg.ID)
-			}
-		}
-
-		if len(ids) == 0 {
-			break
-		}
-
+		var err error
 		switch peer := chat.InputPeer.(type) {
 		case *tg.InputPeerChannel:
 			deleteReq := &tg.ChannelsDeleteMessagesRequest{
 				Channel: &tg.InputChannel{ChannelID: peer.ChannelID, AccessHash: peer.AccessHash},
-				ID:      ids,
+				ID:      chunk,
 			}
 			if takeoutID != 0 {
 				var result tg.MessagesAffectedMessages
@@ -326,13 +347,13 @@ func DeleteMyMessages(ctx context.Context, client *telegram.Client, chat ChatInf
 		default:
 			_, err = api.MessagesDeleteMessages(ctx, &tg.MessagesDeleteMessagesRequest{
 				Revoke: true,
-				ID:     ids,
+				ID:     chunk,
 			})
 		}
 		if err != nil {
 			if wait, ok := tgerr.AsFloodWait(err); ok {
 				time.Sleep(wait + time.Second)
-				continue
+				continue // retry same chunk
 			}
 			if tgerr.Is(err, "CHANNEL_PRIVATE") {
 				progress <- DeleteProgress{Deleted: deleted, Total: total, Err: fmt.Errorf("channel is private or deleted — messages can be viewed but not deleted")}
@@ -342,8 +363,9 @@ func DeleteMyMessages(ctx context.Context, client *telegram.Client, chat ChatInf
 			return
 		}
 
-		deleted += len(ids)
+		deleted += len(chunk)
 		progress <- DeleteProgress{Deleted: deleted, Total: total}
+		i = end
 		time.Sleep(300 * time.Millisecond)
 	}
 
