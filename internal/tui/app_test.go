@@ -123,6 +123,57 @@ func TestLeftGroupRemovesOnlyMatchingChat(t *testing.T) {
 	}
 }
 
+func TestLeftChannelsProgressiveUpdates(t *testing.T) {
+	a := newTestApp(t)
+	a.allChats = []tg.ChatInfo{
+		{ID: 1, Type: tg.ChatTypeSupergroup, Title: "regular", MyMessages: 10},
+	}
+	a.loadingLeft = true
+
+	// First snapshot: two left channels discovered, counts unknown yet.
+	a = update(t, a, leftChannelsMsg{
+		chats: []tg.ChatInfo{
+			{ID: 50, Type: tg.ChatTypeChannel, Title: "left-a", IsLeft: true, MyMessages: -1},
+			{ID: 51, Type: tg.ChatTypeChannel, Title: "left-b", IsLeft: true, MyMessages: -1},
+		},
+		found: 2,
+	})
+	if len(a.allChats) != 3 {
+		t.Fatalf("after first update: %d chats, want 3", len(a.allChats))
+	}
+	if a.filter != filterLeftWithMsg {
+		t.Errorf("filter = %d, want auto-switch to filterLeftWithMsg", a.filter)
+	}
+	if a.filterCount() != 6 {
+		t.Errorf("filterCount = %d, want 6 once left channels are shown", a.filterCount())
+	}
+
+	// Second snapshot supersedes the first: same channels, one count resolved.
+	// The left tail must be replaced, not appended again.
+	a = update(t, a, leftChannelsMsg{
+		chats: []tg.ChatInfo{
+			{ID: 50, Type: tg.ChatTypeChannel, Title: "left-a", IsLeft: true, MyMessages: 4},
+			{ID: 51, Type: tg.ChatTypeChannel, Title: "left-b", IsLeft: true, MyMessages: -1},
+		},
+		found:   2,
+		counted: 1,
+	})
+	if len(a.allChats) != 3 {
+		t.Fatalf("after second update: %d chats, want 3 (no duplication)", len(a.allChats))
+	}
+	if a.allChats[0].Title != "regular" || a.allChats[0].MyMessages != 10 {
+		t.Errorf("regular chat disturbed: %+v", a.allChats[0])
+	}
+	if a.allChats[1].MyMessages != 4 {
+		t.Errorf("left-a count not updated: %+v", a.allChats[1])
+	}
+
+	a = update(t, a, leftChannelsMsg{done: true})
+	if a.loadingLeft || !a.leftLoaded {
+		t.Errorf("done not applied: loadingLeft=%v leftLoaded=%v", a.loadingLeft, a.leftLoaded)
+	}
+}
+
 func TestApplyFilterLeftWithMessages(t *testing.T) {
 	a := newTestApp(t)
 	a.allChats = []tg.ChatInfo{

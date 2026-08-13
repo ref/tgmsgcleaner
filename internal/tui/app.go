@@ -72,6 +72,8 @@ type App struct {
 	leftLoaded      bool
 	loadingLeft     bool
 	leftFound       int
+	leftCounted     int  // channels whose message count has been resolved so far
+	leftShown       bool // left channels have appeared in the list at least once
 
 	selectedChat *tg.ChatInfo
 	actionList   list.Model
@@ -171,6 +173,7 @@ type exportProgressMsg struct {
 type leftChannelsMsg struct {
 	chats   []tg.ChatInfo
 	found   int
+	counted int
 	done    bool
 	err     error
 	nextCmd tea.Cmd
@@ -217,6 +220,13 @@ func NewApp(client *telegram.Client, ctx context.Context, phone string, sessionP
 	l := list.New([]list.Item{}, list.NewDefaultDelegate(), 80, 24)
 	l.Title = "All Chats"
 	l.KeyMap.Quit.SetKeys("q")
+	// Free h/l from page navigation: 'l' triggers the left-channels load on
+	// this screen, and a leftover vim-style page-flip on repeated presses
+	// makes the list jump around. Arrows and pgup/pgdn still page.
+	l.KeyMap.NextPage.SetKeys("right", "pgdown", "f", "d")
+	l.KeyMap.NextPage.SetHelp("→/pgdn", "next page")
+	l.KeyMap.PrevPage.SetKeys("left", "pgup", "b", "u")
+	l.KeyMap.PrevPage.SetHelp("←/pgup", "prev page")
 	l.AdditionalShortHelpKeys = func() []key.Binding {
 		return []key.Binding{addAccountKey, switchAccountKey, leftChannelsKey}
 	}
@@ -386,7 +396,7 @@ func formatDescription(c tg.ChatInfo) string {
 var statusStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
 
 func (a App) filterCount() int {
-	if a.leftLoaded {
+	if a.leftLoaded || a.leftShown {
 		return 6 // All, Groups, Supergroups, Channels, Left+msg, Left
 	}
 	return 4 // All, Groups, Supergroups, Channels
@@ -505,6 +515,7 @@ func waitForLeftChannels(ch <-chan tg.LeftChannelsProgress) tea.Cmd {
 		return leftChannelsMsg{
 			chats:   p.Chats,
 			found:   p.Found,
+			counted: p.Counted,
 			done:    p.Done,
 			err:     p.Err,
 			nextCmd: waitForLeftChannels(ch),
@@ -682,10 +693,29 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 		a.leftFound = msg.found
+		a.leftCounted = msg.counted
+		if len(msg.chats) > 0 {
+			// Replace the left-channel tail with the latest snapshot. IsLeft
+			// marks exactly the chats owned by this loader, so stripping by it
+			// keeps regular chats intact and never duplicates on updates.
+			kept := a.allChats[:0:0]
+			for _, c := range a.allChats {
+				if !c.IsLeft {
+					kept = append(kept, c)
+				}
+			}
+			a.allChats = append(kept, msg.chats...)
+			if !a.leftShown {
+				// First results just arrived: jump to the view the user asked
+				// for instead of leaving them on 'All' with a merged list.
+				a.leftShown = true
+				a.filter = filterLeftWithMsg
+			}
+			a.applyFilter()
+		}
 		if msg.done {
 			a.loadingLeft = false
 			a.leftLoaded = true
-			a.allChats = append(a.allChats, msg.chats...)
 			a.applyFilter()
 			return a, nil
 		}
@@ -910,13 +940,19 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 
-		if msg.String() == "l" && a.screen == screenGroupList && !a.leftLoaded && !a.loadingLeft {
-			a.loadingLeft = true
-			a.leftFound = 0
-			a.groupListErr = ""
-			ch := make(chan tg.LeftChannelsProgress, 1)
-			go tg.GetLeftChannels(a.ctx, a.client, a.selfID, ch)
-			return a, waitForLeftChannels(ch)
+		if msg.String() == "l" && a.screen == screenGroupList {
+			if !a.leftLoaded && !a.loadingLeft {
+				a.loadingLeft = true
+				a.leftFound = 0
+				a.leftCounted = 0
+				a.groupListErr = ""
+				ch := make(chan tg.LeftChannelsProgress, 1)
+				go tg.GetLeftChannels(a.ctx, a.client, a.selfID, ch)
+				return a, waitForLeftChannels(ch)
+			}
+			// Already loading/loaded: swallow the key so it doesn't fall
+			// through to the list widget (where 'l' would mean 'next page').
+			return a, nil
 		}
 
 		if msg.String() == "a" && a.screen == screenGroupList {
@@ -1008,7 +1044,11 @@ func (a App) View() tea.View {
 			content += "  " + a.progress.ViewAs(pct) + "\n"
 		}
 		if a.loadingLeft {
-			content += fmt.Sprintf("  Loading left channels... found %d\n", a.leftFound)
+			if a.leftCounted > 0 {
+				content += fmt.Sprintf("  Left channels: counting messages... %d/%d\n", a.leftCounted, a.leftFound)
+			} else {
+				content += fmt.Sprintf("  Loading left channels... found %d\n", a.leftFound)
+			}
 		}
 		if !a.loadingMessages && a.countErrors > 0 {
 			content += fmt.Sprintf("  ⚠️  %d chats failed to count\n", a.countErrors)

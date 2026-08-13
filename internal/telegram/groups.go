@@ -774,10 +774,18 @@ func ExportMyMessages(ctx context.Context, client *telegram.Client, chat ChatInf
 }
 
 type LeftChannelsProgress struct {
-	Chats []ChatInfo
-	Found int
-	Done  bool
-	Err   error
+	Chats   []ChatInfo
+	Found   int
+	Counted int // how many of Found have had their message count resolved
+	Done    bool
+	Err     error
+}
+
+// snapshotChats returns a copy of chats safe to hand to another goroutine:
+// GetLeftChannels keeps mutating its slice (filling MyMessages) after each
+// progress send, so consumers must never share its backing array.
+func snapshotChats(chats []ChatInfo) []ChatInfo {
+	return append([]ChatInfo(nil), chats...)
 }
 
 func GetLeftChannels(ctx context.Context, client *telegram.Client, selfID int64, progress chan<- LeftChannelsProgress) {
@@ -840,7 +848,7 @@ func GetLeftChannels(ctx context.Context, client *telegram.Client, selfID int64,
 			}
 
 			offset += len(chatList)
-			if !sendProgress(ctx, progress, LeftChannelsProgress{Chats: allChats, Found: len(allChats)}) {
+			if !sendProgress(ctx, progress, LeftChannelsProgress{Chats: snapshotChats(allChats), Found: len(allChats)}) {
 				return ctx.Err()
 			}
 			time.Sleep(200 * time.Millisecond)
@@ -854,10 +862,12 @@ func GetLeftChannels(ctx context.Context, client *telegram.Client, selfID int64,
 				if ctx.Err() != nil {
 					return ctx.Err() // cancelled: stop and finish takeout with Success=false
 				}
-				continue // skip channels where counting genuinely fails (e.g. CHANNEL_PRIVATE)
+				// Leave MyMessages at -1 for channels where counting genuinely
+				// fails (e.g. CHANNEL_PRIVATE); still advance the progress counter.
+			} else {
+				allChats[i].MyMessages = count
 			}
-			allChats[i].MyMessages = count
-			if !sendProgress(ctx, progress, LeftChannelsProgress{Chats: allChats, Found: len(allChats)}) {
+			if !sendProgress(ctx, progress, LeftChannelsProgress{Chats: snapshotChats(allChats), Found: len(allChats), Counted: i + 1}) {
 				return ctx.Err()
 			}
 			time.Sleep(200 * time.Millisecond)
