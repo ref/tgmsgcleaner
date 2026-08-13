@@ -195,43 +195,35 @@ func FetchMyMessages(ctx context.Context, client *telegram.Client, chat ChatInfo
 	api := client.API()
 	nextOffsetID = offsetID
 
-	var takeoutID int64
-	if chat.IsLeft {
-		takeout, e := api.AccountInitTakeoutSession(ctx, &tg.AccountInitTakeoutSessionRequest{
-			MessageMegagroups: true,
-			MessageChannels:   true,
-		})
+	err = withTakeout(ctx, api, chat.IsLeft, func(takeoutID int64) error {
+		rawMessages, e := searchMessagesWithOffset(ctx, api, chat.InputPeer, selfID, takeoutID, offsetID, limit)
 		if e != nil {
-			return nil, 0, false, fmt.Errorf("init takeout: %w", e)
+			return fmt.Errorf("fetching messages: %w", e)
 		}
-		takeoutID = takeout.ID
-		defer api.AccountFinishTakeoutSession(ctx, &tg.AccountFinishTakeoutSessionRequest{Success: true})
-	}
-
-	rawMessages, e := searchMessagesWithOffset(ctx, api, chat.InputPeer, selfID, takeoutID, offsetID, limit)
-	if e != nil {
-		return nil, 0, false, fmt.Errorf("fetching messages: %w", e)
-	}
-
-	for _, m := range rawMessages {
-		nextOffsetID = m.GetID() // advance by every raw message, including filtered ones
-		msg, ok := m.(*tg.Message)
-		if !ok {
-			continue
+		for _, m := range rawMessages {
+			nextOffsetID = m.GetID() // advance by every raw message, including filtered ones
+			msg, ok := m.(*tg.Message)
+			if !ok {
+				continue
+			}
+			text := msg.Message
+			if text == "" {
+				text = "[media]"
+			}
+			messages = append(messages, MessageInfo{
+				ID:   msg.ID,
+				Date: msg.Date,
+				Text: text,
+			})
 		}
-		text := msg.Message
-		if text == "" {
-			text = "[media]"
-		}
-		messages = append(messages, MessageInfo{
-			ID:   msg.ID,
-			Date: msg.Date,
-			Text: text,
-		})
+		// More pages exist when the server returned a full raw page; decide on the
+		// raw count, not the filtered one, or service messages would truncate history.
+		hasMore = len(rawMessages) == limit
+		return nil
+	})
+	if err != nil {
+		return nil, 0, false, err
 	}
-	// More pages exist when the server returned a full raw page; decide on the
-	// raw count, not the filtered one, or service messages would truncate history.
-	hasMore = len(rawMessages) == limit
 	return messages, nextOffsetID, hasMore, nil
 }
 
@@ -256,137 +248,155 @@ func sendProgress[T any](ctx context.Context, ch chan<- T, v T) bool {
 	}
 }
 
+// withTakeout runs fn inside an MTProto takeout session when one is needed
+// (left chats), passing the session id (0 when not needed). Afterwards it makes
+// a best-effort attempt to finish the session with Success = (fn returned nil).
+// If ctx is already cancelled (quit/account switch mid-operation), the finish
+// fails fast rather than blocking a tearing-down client, and the session is
+// left to expire server-side.
+func withTakeout(ctx context.Context, api *tg.Client, needed bool, fn func(takeoutID int64) error) error {
+	if !needed {
+		return fn(0)
+	}
+	takeout, err := api.AccountInitTakeoutSession(ctx, &tg.AccountInitTakeoutSessionRequest{
+		MessageMegagroups: true,
+		MessageChannels:   true,
+	})
+	if err != nil {
+		return fmt.Errorf("init takeout: %w", err)
+	}
+	runErr := fn(takeout.ID)
+	// Best-effort finish on every path. On cancellation (quit/account switch)
+	// this fails fast rather than blocking a tearing-down client; the session
+	// then auto-expires server-side.
+	api.AccountFinishTakeoutSession(ctx, &tg.AccountFinishTakeoutSessionRequest{Success: runErr == nil})
+	return runErr
+}
+
 func DeleteMyMessages(ctx context.Context, client *telegram.Client, chat ChatInfo, selfID int64, progress chan<- DeleteProgress) {
 	defer close(progress)
 	api := client.API()
 
-	var takeoutID int64
-	if chat.IsLeft {
-		takeout, err := api.AccountInitTakeoutSession(ctx, &tg.AccountInitTakeoutSessionRequest{
-			MessageMegagroups: true,
-			MessageChannels:   true,
-		})
-		if err != nil {
-			sendProgress(ctx, progress, DeleteProgress{Err: fmt.Errorf("init takeout: %w", err)})
-			return
-		}
-		takeoutID = takeout.ID
-		defer api.AccountFinishTakeoutSession(ctx, &tg.AccountFinishTakeoutSessionRequest{Success: true})
-	}
-
-	// Phase 1: collect all message IDs by paginating through search with advancing offsetID.
-	// Must complete BEFORE any deletion — otherwise the search index lag after batch-delete
-	// causes the loop to exit early (server returns empty or stale results).
-	var ids []int
-	offsetID := 0
-	for {
-		rawMsgs, err := searchMessagesWithOffset(ctx, api, chat.InputPeer, selfID, takeoutID, offsetID, 100)
-		if err != nil {
-			sendProgress(ctx, progress, DeleteProgress{Err: err})
-			return
-		}
-		if len(rawMsgs) == 0 {
-			break
-		}
-
-		nextOffset := offsetID
-		for _, m := range rawMsgs {
-			nextOffset = m.GetID() // advance by every raw message, incl. service/empty ones
-			msg, ok := m.(*tg.Message)
-			if !ok {
-				continue
+	started := false
+	err := withTakeout(ctx, api, chat.IsLeft, func(takeoutID int64) error {
+		started = true
+		// Phase 1: collect all message IDs by paginating through search with advancing offsetID.
+		// Must complete BEFORE any deletion — otherwise the search index lag after batch-delete
+		// causes the loop to exit early (server returns empty or stale results).
+		var ids []int
+		offsetID := 0
+		for {
+			rawMsgs, err := searchMessagesWithOffset(ctx, api, chat.InputPeer, selfID, takeoutID, offsetID, 100)
+			if err != nil {
+				sendProgress(ctx, progress, DeleteProgress{Err: err})
+				return err
 			}
-			// Safety check: only delete messages we can positively confirm are
-			// ours. The server search already filters by FromID=self, but if a
-			// message carries no confirmable PeerUser author, skip it rather than
-			// risk deleting someone else's message.
-			fromID, ok := msg.GetFromID()
-			if !ok {
-				continue
+			if len(rawMsgs) == 0 {
+				break
 			}
-			peer, ok := fromID.(*tg.PeerUser)
-			if !ok || peer.UserID != selfID {
-				continue
-			}
-			ids = append(ids, msg.ID)
-		}
 
-		if !sendProgress(ctx, progress, DeleteProgress{Deleted: 0, Total: len(ids)}) {
-			return
-		}
-
-		if len(rawMsgs) < 100 {
-			break
-		}
-		if nextOffset == offsetID {
-			break // no progress, avoid infinite loop
-		}
-		offsetID = nextOffset
-		time.Sleep(200 * time.Millisecond)
-	}
-
-	total := len(ids)
-	if total == 0 {
-		sendProgress(ctx, progress, DeleteProgress{Done: true})
-		return
-	}
-
-	// Phase 2: delete collected IDs in chunks of 100.
-	deleted := 0
-	i := 0
-	for i < total {
-		end := i + 100
-		if end > total {
-			end = total
-		}
-		chunk := ids[i:end]
-
-		var err error
-		switch peer := chat.InputPeer.(type) {
-		case *tg.InputPeerChannel:
-			deleteReq := &tg.ChannelsDeleteMessagesRequest{
-				Channel: &tg.InputChannel{ChannelID: peer.ChannelID, AccessHash: peer.AccessHash},
-				ID:      chunk,
-			}
-			if takeoutID != 0 {
-				var result tg.MessagesAffectedMessages
-				err = api.Invoker().Invoke(ctx, &tg.InvokeWithTakeoutRequest{
-					TakeoutID: takeoutID,
-					Query:     deleteReq,
-				}, &result)
-			} else {
-				_, err = api.ChannelsDeleteMessages(ctx, deleteReq)
-			}
-		default:
-			_, err = api.MessagesDeleteMessages(ctx, &tg.MessagesDeleteMessagesRequest{
-				Revoke: true,
-				ID:     chunk,
-			})
-		}
-		if err != nil {
-			if wait, ok := tgerr.AsFloodWait(err); ok {
-				if !sleepCtx(ctx, wait+time.Second) {
-					return // ctx cancelled; deferred cleanup runs
+			nextOffset := offsetID
+			for _, m := range rawMsgs {
+				nextOffset = m.GetID() // advance by every raw message, incl. service/empty ones
+				msg, ok := m.(*tg.Message)
+				if !ok {
+					continue
 				}
-				continue // retry same chunk
+				// Safety check: only delete messages we can positively confirm are
+				// ours. The server search already filters by FromID=self, but if a
+				// message carries no confirmable PeerUser author, skip it rather than
+				// risk deleting someone else's message.
+				fromID, ok := msg.GetFromID()
+				if !ok {
+					continue
+				}
+				peer, ok := fromID.(*tg.PeerUser)
+				if !ok || peer.UserID != selfID {
+					continue
+				}
+				ids = append(ids, msg.ID)
 			}
-			if tgerr.Is(err, "CHANNEL_PRIVATE") {
-				sendProgress(ctx, progress, DeleteProgress{Deleted: deleted, Total: total, Err: fmt.Errorf("channel is private or deleted — messages can be viewed but not deleted")})
-				return
+
+			if !sendProgress(ctx, progress, DeleteProgress{Deleted: 0, Total: len(ids)}) {
+				return ctx.Err()
 			}
-			sendProgress(ctx, progress, DeleteProgress{Deleted: deleted, Total: total, Err: err})
-			return
+
+			if len(rawMsgs) < 100 {
+				break
+			}
+			if nextOffset == offsetID {
+				break // no progress, avoid infinite loop
+			}
+			offsetID = nextOffset
+			time.Sleep(200 * time.Millisecond)
 		}
 
-		deleted += len(chunk)
-		if !sendProgress(ctx, progress, DeleteProgress{Deleted: deleted, Total: total}) {
-			return
+		total := len(ids)
+		if total == 0 {
+			sendProgress(ctx, progress, DeleteProgress{Done: true})
+			return nil
 		}
-		i = end
-		time.Sleep(300 * time.Millisecond)
+
+		// Phase 2: delete collected IDs in chunks of 100.
+		deleted := 0
+		i := 0
+		for i < total {
+			end := min(i+100, total)
+			chunk := ids[i:end]
+
+			var err error
+			switch peer := chat.InputPeer.(type) {
+			case *tg.InputPeerChannel:
+				deleteReq := &tg.ChannelsDeleteMessagesRequest{
+					Channel: &tg.InputChannel{ChannelID: peer.ChannelID, AccessHash: peer.AccessHash},
+					ID:      chunk,
+				}
+				if takeoutID != 0 {
+					var result tg.MessagesAffectedMessages
+					err = api.Invoker().Invoke(ctx, &tg.InvokeWithTakeoutRequest{
+						TakeoutID: takeoutID,
+						Query:     deleteReq,
+					}, &result)
+				} else {
+					_, err = api.ChannelsDeleteMessages(ctx, deleteReq)
+				}
+			default:
+				_, err = api.MessagesDeleteMessages(ctx, &tg.MessagesDeleteMessagesRequest{
+					Revoke: true,
+					ID:     chunk,
+				})
+			}
+			if err != nil {
+				if wait, ok := tgerr.AsFloodWait(err); ok {
+					if !sleepCtx(ctx, wait+time.Second) {
+						return ctx.Err() // ctx cancelled
+					}
+					continue // retry same chunk
+				}
+				if tgerr.Is(err, "CHANNEL_PRIVATE") {
+					sendProgress(ctx, progress, DeleteProgress{Deleted: deleted, Total: total, Err: fmt.Errorf("channel is private or deleted — messages can be viewed but not deleted")})
+					return err
+				}
+				sendProgress(ctx, progress, DeleteProgress{Deleted: deleted, Total: total, Err: err})
+				return err
+			}
+
+			deleted += len(chunk)
+			if !sendProgress(ctx, progress, DeleteProgress{Deleted: deleted, Total: total}) {
+				return ctx.Err()
+			}
+			i = end
+			time.Sleep(300 * time.Millisecond)
+		}
+
+		sendProgress(ctx, progress, DeleteProgress{Deleted: deleted, Total: total, Done: true})
+		return nil
+	})
+	if err != nil && !started {
+		// withTakeout failed before the body ran (takeout init error); the body
+		// reports its own errors, so only surface the init failure here.
+		sendProgress(ctx, progress, DeleteProgress{Err: err})
 	}
-
-	sendProgress(ctx, progress, DeleteProgress{Deleted: deleted, Total: total, Done: true})
 }
 
 // sleepCtx waits for d, returning false if ctx is cancelled first. Used so a
@@ -661,94 +671,88 @@ func ExportMyMessages(ctx context.Context, client *telegram.Client, chat ChatInf
 	defer close(progress)
 	api := client.API()
 
-	var takeoutID int64
-	if chat.IsLeft {
-		takeout, err := api.AccountInitTakeoutSession(ctx, &tg.AccountInitTakeoutSessionRequest{
-			MessageMegagroups: true,
-			MessageChannels:   true,
-		})
+	started := false
+	err := withTakeout(ctx, api, chat.IsLeft, func(takeoutID int64) error {
+		started = true
+		total, err := countMessages(ctx, api, chat.InputPeer, selfID, takeoutID)
 		if err != nil {
-			sendProgress(ctx, progress, ExportProgress{Err: fmt.Errorf("init takeout: %w", err)})
-			return
+			sendProgress(ctx, progress, ExportProgress{Err: err})
+			return err
 		}
-		takeoutID = takeout.ID
-		defer api.AccountFinishTakeoutSession(ctx, &tg.AccountFinishTakeoutSessionRequest{Success: true})
-	}
-
-	total, err := countMessages(ctx, api, chat.InputPeer, selfID, takeoutID)
-	if err != nil {
-		sendProgress(ctx, progress, ExportProgress{Err: err})
-		return
-	}
-	if total == 0 {
-		sendProgress(ctx, progress, ExportProgress{Done: true})
-		return
-	}
-
-	filename := sanitizeFilename(chat.Title) + " (" + phone + ").txt"
-	f, err := os.Create(filename)
-	if err != nil {
-		sendProgress(ctx, progress, ExportProgress{Err: fmt.Errorf("create file: %w", err)})
-		return
-	}
-	success := false
-	defer func() {
-		f.Close() // idempotent; the checked Close is the explicit one below
-		if !success {
-			os.Remove(filename) // don't leave a partial/corrupt export behind
+		if total == 0 {
+			sendProgress(ctx, progress, ExportProgress{Done: true})
+			return nil
 		}
-	}()
 
-	if _, err := fmt.Fprintf(f, "Export: %s\nAccount: %s\nDate: %s\nMessages: %d\n\n", chat.Title, phone, time.Now().Format("2006-01-02 15:04"), total); err != nil {
-		sendProgress(ctx, progress, ExportProgress{Err: fmt.Errorf("write file: %w", err)})
-		return
-	}
-
-	exported := 0
-	offsetID := 0
-	for {
-		rawMsgs, err := searchMessagesWithOffset(ctx, api, chat.InputPeer, selfID, takeoutID, offsetID, 100)
+		filename := sanitizeFilename(chat.Title) + " (" + phone + ").txt"
+		f, err := os.Create(filename)
 		if err != nil {
-			sendProgress(ctx, progress, ExportProgress{Exported: exported, Total: total, Err: err})
-			return
+			sendProgress(ctx, progress, ExportProgress{Err: fmt.Errorf("create file: %w", err)})
+			return err
 		}
-		if len(rawMsgs) == 0 {
-			break
-		}
-		newOffsetID := offsetID
-		for _, m := range rawMsgs {
-			newOffsetID = m.GetID() // advance by every raw message, incl. service/empty ones
-			msg, ok := m.(*tg.Message)
-			if !ok {
-				continue
+		success := false
+		defer func() {
+			f.Close() // idempotent; the checked Close is the explicit one below
+			if !success {
+				os.Remove(filename) // don't leave a partial/corrupt export behind
 			}
-			text := msg.Message
-			if text == "" {
-				text = "[media]"
-			}
-			t := time.Unix(int64(msg.Date), 0)
-			if _, err := fmt.Fprintf(f, "[%s] %s\n", t.Format("2006-01-02 15:04"), text); err != nil {
-				sendProgress(ctx, progress, ExportProgress{Exported: exported, Total: total, Err: fmt.Errorf("write file: %w", err)})
-				return
-			}
-			exported++
-		}
-		if newOffsetID == offsetID {
-			break // no progress, avoid infinite loop
-		}
-		offsetID = newOffsetID
-		if !sendProgress(ctx, progress, ExportProgress{Exported: exported, Total: total}) {
-			return
-		}
-		time.Sleep(200 * time.Millisecond)
-	}
+		}()
 
-	if err := f.Close(); err != nil {
-		sendProgress(ctx, progress, ExportProgress{Exported: exported, Total: total, Err: fmt.Errorf("close file: %w", err)})
-		return
+		if _, err := fmt.Fprintf(f, "Export: %s\nAccount: %s\nDate: %s\nMessages: %d\n\n", chat.Title, phone, time.Now().Format("2006-01-02 15:04"), total); err != nil {
+			sendProgress(ctx, progress, ExportProgress{Err: fmt.Errorf("write file: %w", err)})
+			return err
+		}
+
+		exported := 0
+		offsetID := 0
+		for {
+			rawMsgs, err := searchMessagesWithOffset(ctx, api, chat.InputPeer, selfID, takeoutID, offsetID, 100)
+			if err != nil {
+				sendProgress(ctx, progress, ExportProgress{Exported: exported, Total: total, Err: err})
+				return err
+			}
+			if len(rawMsgs) == 0 {
+				break
+			}
+			newOffsetID := offsetID
+			for _, m := range rawMsgs {
+				newOffsetID = m.GetID() // advance by every raw message, incl. service/empty ones
+				msg, ok := m.(*tg.Message)
+				if !ok {
+					continue
+				}
+				text := msg.Message
+				if text == "" {
+					text = "[media]"
+				}
+				t := time.Unix(int64(msg.Date), 0)
+				if _, err := fmt.Fprintf(f, "[%s] %s\n", t.Format("2006-01-02 15:04"), text); err != nil {
+					sendProgress(ctx, progress, ExportProgress{Exported: exported, Total: total, Err: fmt.Errorf("write file: %w", err)})
+					return err
+				}
+				exported++
+			}
+			if newOffsetID == offsetID {
+				break // no progress, avoid infinite loop
+			}
+			offsetID = newOffsetID
+			if !sendProgress(ctx, progress, ExportProgress{Exported: exported, Total: total}) {
+				return ctx.Err()
+			}
+			time.Sleep(200 * time.Millisecond)
+		}
+
+		if err := f.Close(); err != nil {
+			sendProgress(ctx, progress, ExportProgress{Exported: exported, Total: total, Err: fmt.Errorf("close file: %w", err)})
+			return err
+		}
+		success = true
+		sendProgress(ctx, progress, ExportProgress{Exported: exported, Total: total, Done: true, FilePath: filename})
+		return nil
+	})
+	if err != nil && !started {
+		sendProgress(ctx, progress, ExportProgress{Err: err}) // takeout init failed before the body ran
 	}
-	success = true
-	sendProgress(ctx, progress, ExportProgress{Exported: exported, Total: total, Done: true, FilePath: filename})
 }
 
 type LeftChannelsProgress struct {
@@ -762,89 +766,89 @@ func GetLeftChannels(ctx context.Context, client *telegram.Client, selfID int64,
 	defer close(progress)
 	api := client.API()
 
-	takeout, err := api.AccountInitTakeoutSession(ctx, &tg.AccountInitTakeoutSessionRequest{
-		MessageMegagroups: true,
-		MessageChannels:   true,
+	started := false
+	err := withTakeout(ctx, api, true, func(takeoutID int64) error {
+		started = true
+		invoker := api.Invoker()
+		var allChats []ChatInfo
+		offset := 0
+
+		for {
+			var result tg.MessagesChatsBox
+			err := invoker.Invoke(ctx, &tg.InvokeWithTakeoutRequest{
+				TakeoutID: takeoutID,
+				Query:     &tg.ChannelsGetLeftChannelsRequest{Offset: offset},
+			}, &result)
+			if err != nil {
+				sendProgress(ctx, progress, LeftChannelsProgress{Chats: allChats, Found: len(allChats), Err: fmt.Errorf("get left channels: %w", err)})
+				return err
+			}
+
+			chats := result.Chats
+			var chatList []tg.ChatClass
+			switch c := chats.(type) {
+			case *tg.MessagesChats:
+				chatList = c.Chats
+			case *tg.MessagesChatsSlice:
+				chatList = c.Chats
+			}
+
+			if len(chatList) == 0 {
+				break
+			}
+
+			for _, c := range chatList {
+				ch, ok := c.(*tg.Channel)
+				if !ok {
+					continue
+				}
+				ct := ChatTypeChannel
+				if ch.Megagroup {
+					ct = ChatTypeSupergroup
+				}
+				username := ""
+				if u, ok := ch.GetUsername(); ok {
+					username = u
+				}
+				allChats = append(allChats, ChatInfo{
+					Title:      ch.Title,
+					ID:         ch.ID,
+					Type:       ct,
+					Username:   username,
+					InputPeer:  &tg.InputPeerChannel{ChannelID: ch.ID, AccessHash: ch.AccessHash},
+					MyMessages: -1,
+					IsLeft:     true,
+				})
+			}
+
+			offset += len(chatList)
+			if !sendProgress(ctx, progress, LeftChannelsProgress{Chats: allChats, Found: len(allChats)}) {
+				return ctx.Err()
+			}
+			time.Sleep(200 * time.Millisecond)
+		}
+
+		// Count messages in left channels via takeout. countMessages routes through
+		// invokeWithRetry, so transient FLOOD_WAIT is waited out rather than skipped.
+		for i := range allChats {
+			count, err := countMessages(ctx, api, allChats[i].InputPeer, selfID, takeoutID)
+			if err != nil {
+				if ctx.Err() != nil {
+					return ctx.Err() // cancelled: stop and finish takeout with Success=false
+				}
+				continue // skip channels where counting genuinely fails (e.g. CHANNEL_PRIVATE)
+			}
+			allChats[i].MyMessages = count
+			if !sendProgress(ctx, progress, LeftChannelsProgress{Chats: allChats, Found: len(allChats)}) {
+				return ctx.Err()
+			}
+			time.Sleep(200 * time.Millisecond)
+		}
+
+		sendProgress(ctx, progress, LeftChannelsProgress{Chats: allChats, Found: len(allChats), Done: true})
+		return nil
 	})
-	if err != nil {
-		sendProgress(ctx, progress, LeftChannelsProgress{Err: fmt.Errorf("init takeout: %w", err)})
-		return
+	if err != nil && !started {
+		sendProgress(ctx, progress, LeftChannelsProgress{Err: err}) // takeout init failed before the body ran
 	}
-
-	invoker := api.Invoker()
-	var allChats []ChatInfo
-	offset := 0
-
-	for {
-		var result tg.MessagesChatsBox
-		err := invoker.Invoke(ctx, &tg.InvokeWithTakeoutRequest{
-			TakeoutID: takeout.ID,
-			Query:     &tg.ChannelsGetLeftChannelsRequest{Offset: offset},
-		}, &result)
-		if err != nil {
-			sendProgress(ctx, progress, LeftChannelsProgress{Chats: allChats, Found: len(allChats), Err: fmt.Errorf("get left channels: %w", err)})
-			api.AccountFinishTakeoutSession(ctx, &tg.AccountFinishTakeoutSessionRequest{Success: false})
-			return
-		}
-
-		chats := result.Chats
-		var chatList []tg.ChatClass
-		switch c := chats.(type) {
-		case *tg.MessagesChats:
-			chatList = c.Chats
-		case *tg.MessagesChatsSlice:
-			chatList = c.Chats
-		}
-
-		if len(chatList) == 0 {
-			break
-		}
-
-		for _, c := range chatList {
-			ch, ok := c.(*tg.Channel)
-			if !ok {
-				continue
-			}
-			ct := ChatTypeChannel
-			if ch.Megagroup {
-				ct = ChatTypeSupergroup
-			}
-			username := ""
-			if u, ok := ch.GetUsername(); ok {
-				username = u
-			}
-			allChats = append(allChats, ChatInfo{
-				Title:      ch.Title,
-				ID:         ch.ID,
-				Type:       ct,
-				Username:   username,
-				InputPeer:  &tg.InputPeerChannel{ChannelID: ch.ID, AccessHash: ch.AccessHash},
-				MyMessages: -1,
-				IsLeft:     true,
-			})
-		}
-
-		offset += len(chatList)
-		if !sendProgress(ctx, progress, LeftChannelsProgress{Chats: allChats, Found: len(allChats)}) {
-			return
-		}
-		time.Sleep(200 * time.Millisecond)
-	}
-
-	// Count messages in left channels via takeout. countMessages routes through
-	// invokeWithRetry, so transient FLOOD_WAIT is waited out rather than skipped.
-	for i := range allChats {
-		count, err := countMessages(ctx, api, allChats[i].InputPeer, selfID, takeout.ID)
-		if err != nil {
-			continue // skip channels where counting genuinely fails (e.g. CHANNEL_PRIVATE)
-		}
-		allChats[i].MyMessages = count
-		if !sendProgress(ctx, progress, LeftChannelsProgress{Chats: allChats, Found: len(allChats)}) {
-			return
-		}
-		time.Sleep(200 * time.Millisecond)
-	}
-
-	api.AccountFinishTakeoutSession(ctx, &tg.AccountFinishTakeoutSessionRequest{Success: true})
-	sendProgress(ctx, progress, LeftChannelsProgress{Chats: allChats, Found: len(allChats), Done: true})
 }
