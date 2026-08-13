@@ -173,26 +173,8 @@ func GetChats(ctx context.Context, client *telegram.Client) ([]ChatInfo, error) 
 }
 
 func CountMyMessages(ctx context.Context, client *telegram.Client, peer tg.InputPeerClass, selfID int64) (int, error) {
-	result, err := client.API().MessagesSearch(ctx, &tg.MessagesSearchRequest{
-		Peer:   peer,
-		Q:      "",
-		FromID: &tg.InputPeerUser{UserID: selfID},
-		Filter: &tg.InputMessagesFilterEmpty{},
-		Limit:  1,
-	})
-	if err != nil {
-		return 0, err
-	}
-
-	switch r := result.(type) {
-	case *tg.MessagesMessages:
-		return len(r.Messages), nil
-	case *tg.MessagesMessagesSlice:
-		return r.Count, nil
-	case *tg.MessagesChannelMessages:
-		return r.Count, nil
-	}
-	return 0, nil
+	// Delegate to the retry-safe helper (handles FLOOD_WAIT via invokeWithRetry).
+	return countMessages(ctx, client.API(), peer, selfID, 0)
 }
 
 func GetSelfID(ctx context.Context, client *telegram.Client) (int64, error) {
@@ -404,6 +386,20 @@ func invokeWithRetry(ctx context.Context, api *tg.Client, takeoutID int64, req t
 	}
 }
 
+// retryFlood runs fn, waiting out FLOOD_WAIT errors and retrying until it
+// succeeds or returns a non-flood error. Used for API calls that don't go
+// through invokeWithRetry (which is specific to MessagesSearchRequest).
+func retryFlood(fn func() error) error {
+	for {
+		err := fn()
+		if wait, ok := tgerr.AsFloodWait(err); ok {
+			time.Sleep(wait + time.Second)
+			continue
+		}
+		return err
+	}
+}
+
 func searchMessages(ctx context.Context, api *tg.Client, peer tg.InputPeerClass, selfID int64, takeoutID int64, limit int) ([]tg.MessageClass, error) {
 	return searchMessagesWithOffset(ctx, api, peer, selfID, takeoutID, 0, limit)
 }
@@ -475,10 +471,15 @@ func RemoveMyReactions(ctx context.Context, client *telegram.Client, chat ChatIn
 	offsetID := 0
 
 	for {
-		historyResult, err := api.MessagesGetHistory(ctx, &tg.MessagesGetHistoryRequest{
-			Peer:     chat.InputPeer,
-			OffsetID: offsetID,
-			Limit:    100,
+		var historyResult tg.MessagesMessagesClass
+		err := retryFlood(func() error {
+			var e error
+			historyResult, e = api.MessagesGetHistory(ctx, &tg.MessagesGetHistoryRequest{
+				Peer:     chat.InputPeer,
+				OffsetID: offsetID,
+				Limit:    100,
+			})
+			return e
 		})
 		if err != nil {
 			progress <- ReactionProgress{Checked: checked, Removed: removed, Err: err}
@@ -516,10 +517,13 @@ func RemoveMyReactions(ctx context.Context, client *telegram.Client, chat ChatIn
 			}
 
 			if hasMyReaction {
-				_, err := api.MessagesSendReaction(ctx, &tg.MessagesSendReactionRequest{
-					Peer:     chat.InputPeer,
-					MsgID:    msg.ID,
-					Reaction: []tg.ReactionClass{},
+				err := retryFlood(func() error {
+					_, e := api.MessagesSendReaction(ctx, &tg.MessagesSendReactionRequest{
+						Peer:     chat.InputPeer,
+						MsgID:    msg.ID,
+						Reaction: []tg.ReactionClass{},
+					})
+					return e
 				})
 				if err != nil {
 					progress <- ReactionProgress{Checked: checked, Removed: removed, Err: err}
@@ -748,30 +752,14 @@ func GetLeftChannels(ctx context.Context, client *telegram.Client, selfID int64,
 		time.Sleep(200 * time.Millisecond)
 	}
 
-	// Count messages in left channels via takeout
+	// Count messages in left channels via takeout. countMessages routes through
+	// invokeWithRetry, so transient FLOOD_WAIT is waited out rather than skipped.
 	for i := range allChats {
-		var result tg.MessagesMessagesBox
-		err := invoker.Invoke(ctx, &tg.InvokeWithTakeoutRequest{
-			TakeoutID: takeout.ID,
-			Query: &tg.MessagesSearchRequest{
-				Peer:   allChats[i].InputPeer,
-				Q:      "",
-				FromID: &tg.InputPeerUser{UserID: selfID},
-				Filter: &tg.InputMessagesFilterEmpty{},
-				Limit:  1,
-			},
-		}, &result)
+		count, err := countMessages(ctx, api, allChats[i].InputPeer, selfID, takeout.ID)
 		if err != nil {
-			continue // skip channels where counting fails
+			continue // skip channels where counting genuinely fails (e.g. CHANNEL_PRIVATE)
 		}
-		switch r := result.Messages.(type) {
-		case *tg.MessagesMessages:
-			allChats[i].MyMessages = len(r.Messages)
-		case *tg.MessagesMessagesSlice:
-			allChats[i].MyMessages = r.Count
-		case *tg.MessagesChannelMessages:
-			allChats[i].MyMessages = r.Count
-		}
+		allChats[i].MyMessages = count
 		progress <- LeftChannelsProgress{Chats: allChats, Found: len(allChats)}
 		time.Sleep(200 * time.Millisecond)
 	}
