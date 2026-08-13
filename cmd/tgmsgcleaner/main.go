@@ -68,6 +68,9 @@ func main() {
 			fmt.Printf("error: %v\n", err)
 			os.Exit(1)
 		}
+		if phone == "" {
+			return // user quit the account picker — clean exit
+		}
 
 		sessionPath, err := config.SessionPath(phone)
 		if err != nil {
@@ -79,20 +82,26 @@ func main() {
 
 		exitAction := ""
 		client := tg.NewClient(cfg.APIID, cfg.APIHash, sessionPath)
-		client.Run(context.Background(), func(ctx context.Context) error {
+		runErr := client.Run(context.Background(), func(ctx context.Context) error {
 			isAuth, err := tg.IsAuthorized(ctx, client)
 			if err != nil {
-				fmt.Printf("failed to check auth status: %v\n", err)
-				return err
+				return fmt.Errorf("check auth status: %w", err)
 			}
 
 			app := tui.NewApp(client, ctx, phone, sessionPath, isAuth, len(accounts))
-			finalModel, _ := tea.NewProgram(app).Run()
+			finalModel, err := tea.NewProgram(app).Run()
+			if err != nil {
+				return fmt.Errorf("run TUI: %w", err)
+			}
 			if final, ok := finalModel.(tui.App); ok {
 				exitAction = final.ExitAction
 			}
 			return nil
 		})
+		if runErr != nil {
+			fmt.Printf("error: %v\n", runErr)
+			os.Exit(1)
+		}
 
 		switch exitAction {
 		case "add":
@@ -136,5 +145,5 @@ func pickAccount(forceNew bool) (string, error) {
 	if final, ok := finalModel.(tui.App); ok && final.Selected != "" {
 		return final.Selected, nil
 	}
-	return "", fmt.Errorf("no account selected")
+	return "", nil // user quit the picker without selecting — caller treats empty as clean exit
 }

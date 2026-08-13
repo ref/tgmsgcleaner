@@ -17,7 +17,7 @@ func SendCode(ctx context.Context, client *telegram.Client, phone string, sessio
 	if err != nil {
 		var rpcErr *tgerr.Error
 		if errors.As(err, &rpcErr) && rpcErr.Type == "AUTH_RESTART" {
-			os.Remove(sessionPath)
+			_ = os.Remove(sessionPath) // best-effort cleanup before retry
 			res, err = client.Auth().SendCode(ctx, phone, auth.SendCodeOptions{})
 		}
 		if err != nil {

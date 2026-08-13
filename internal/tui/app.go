@@ -69,6 +69,8 @@ type App struct {
 	loadingMessages bool
 	loadedCount     int
 	loadTotal       int
+	countErrors     int    // number of chats whose message count failed
+	groupListErr    string // error shown on the group list screen (e.g. left-channels load)
 	leftLoaded      bool
 	loadingLeft     bool
 	leftFound       int
@@ -388,16 +390,14 @@ func (a App) filterCount() int {
 
 func (a App) statusBar() string {
 	totalMsgs := 0
-	counted := 0
 	for _, c := range a.allChats {
 		if c.MyMessages >= 0 {
 			totalMsgs += c.MyMessages
-			counted++
 		}
 	}
 	msgs := fmt.Sprintf("%d msgs", totalMsgs)
-	if counted < len(a.allChats) {
-		msgs += "..."
+	if a.loadingMessages {
+		msgs += "..." // counting still in progress; failures are shown separately on the list
 	}
 	return statusStyle.Render(fmt.Sprintf("  %s · %d groups · %s", a.phone, len(a.allChats), msgs))
 }
@@ -414,10 +414,14 @@ func (a *App) openActions(chat tg.ChatInfo) {
 		ActionItem{title: "View my messages", key: "view"},
 		ActionItem{title: "Export my messages", key: "export"},
 		ActionItem{title: "Delete my messages", key: "delete_msgs"},
-		ActionItem{title: "Delete my reactions", key: "delete_reactions"},
 	}
+	// Reactions and leaving require active membership and don't work via
+	// takeout, so they make no sense for channels the user has left.
 	if !chat.IsLeft {
-		items = append(items, ActionItem{title: "Leave group", key: "leave"})
+		items = append(items,
+			ActionItem{title: "Delete my reactions", key: "delete_reactions"},
+			ActionItem{title: "Leave group", key: "leave"},
+		)
 	}
 	a.actionList.SetItems(items)
 }
@@ -551,13 +555,18 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.loadingMessages = true
 		a.loadedCount = 0
 		a.loadTotal = len(a.allChats)
+		a.countErrors = 0
 		ch := make(chan tg.MessageCountProgress, 1)
 		go tg.CountAllMyMessages(a.ctx, a.client, a.allChats, a.selfID, ch)
 		return a, waitForCount(ch)
 
 	case msgCountMsg:
-		if msg.err == nil && msg.chatIndex < len(a.allChats) {
-			a.allChats[msg.chatIndex].MyMessages = msg.count
+		if msg.chatIndex < len(a.allChats) {
+			if msg.err != nil {
+				a.countErrors++
+			} else {
+				a.allChats[msg.chatIndex].MyMessages = msg.count
+			}
 		}
 		a.loadedCount = msg.chatIndex + 1
 		a.loadTotal = msg.total
@@ -643,7 +652,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case leftChannelsMsg:
 		if msg.err != nil {
 			a.loadingLeft = false
-			a.deletingErr = msg.err.Error()
+			a.groupListErr = msg.err.Error()
 			return a, nil
 		}
 		a.leftFound = msg.found
@@ -868,6 +877,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.String() == "l" && a.screen == screenGroupList && !a.leftLoaded && !a.loadingLeft {
 			a.loadingLeft = true
 			a.leftFound = 0
+			a.groupListErr = ""
 			ch := make(chan tg.LeftChannelsProgress, 1)
 			go tg.GetLeftChannels(a.ctx, a.client, a.selfID, ch)
 			return a, waitForLeftChannels(ch)
@@ -962,6 +972,12 @@ func (a App) View() tea.View {
 		}
 		if a.loadingLeft {
 			content += fmt.Sprintf("  Loading left channels... found %d\n", a.leftFound)
+		}
+		if !a.loadingMessages && a.countErrors > 0 {
+			content += fmt.Sprintf("  ⚠️  %d chats failed to count\n", a.countErrors)
+		}
+		if a.groupListErr != "" {
+			content += "  ⚠️  " + a.groupListErr + "\n"
 		}
 		content += "\n" + a.list.View()
 		content += "\n" + a.statusBar()
