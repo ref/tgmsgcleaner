@@ -460,10 +460,6 @@ func retryFlood(ctx context.Context, fn func() error) error {
 	}
 }
 
-func searchMessages(ctx context.Context, api *tg.Client, peer tg.InputPeerClass, selfID int64, takeoutID int64, limit int) ([]tg.MessageClass, error) {
-	return searchMessagesWithOffset(ctx, api, peer, selfID, takeoutID, 0, limit)
-}
-
 func searchMessagesWithOffset(ctx context.Context, api *tg.Client, peer tg.InputPeerClass, selfID int64, takeoutID int64, offsetID int, limit int) ([]tg.MessageClass, error) {
 	req := tg.MessagesSearchRequest{
 		Peer:     peer,

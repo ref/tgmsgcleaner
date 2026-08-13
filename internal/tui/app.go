@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"charm.land/bubbles/v2/key"
@@ -30,7 +31,6 @@ const (
 )
 
 const (
-	filterAll         = 0
 	filterGroups      = 1
 	filterSupergroups = 2
 	filterChannels    = 3
@@ -53,8 +53,8 @@ type App struct {
 	phone       string
 	sessionPath string
 	selfID      int64
-	codeHash string
-	authErr  string
+	codeHash    string
+	authErr     string
 
 	screen    int
 	authInput textinput.Model
@@ -64,8 +64,6 @@ type App struct {
 
 	allChats        []tg.ChatInfo
 	filter          int
-	width           int
-	height          int
 	loadingMessages bool
 	loadedCount     int
 	loadTotal       int
@@ -118,7 +116,7 @@ type Group struct {
 }
 
 type codeSentMsg struct{ codeHash string }
-type authDoneMsg struct{ selfID int64 }
+type authDoneMsg struct{}
 type authErrMsg struct{ err error }
 type needPasswordMsg struct{}
 type authRestartMsg struct{}
@@ -242,13 +240,13 @@ func NewApp(client *telegram.Client, ctx context.Context, phone string, sessionP
 	}
 
 	return App{
-		client:      client,
-		ctx:         ctx,
-		phone:       phone,
-		sessionPath: sessionPath,
-		screen:      screen,
-		authInput: ti,
-		passInput: pi,
+		client:       client,
+		ctx:          ctx,
+		phone:        phone,
+		sessionPath:  sessionPath,
+		screen:       screen,
+		authInput:    ti,
+		passInput:    pi,
 		list:         l,
 		actionList:   al,
 		msgList:      ml,
@@ -382,14 +380,7 @@ func formatDescription(c tg.ChatInfo) string {
 	if c.MyMessages >= 0 {
 		parts = append(parts, fmt.Sprintf("%d your msgs", c.MyMessages))
 	}
-	desc := ""
-	for i, p := range parts {
-		if i > 0 {
-			desc += " · "
-		}
-		desc += p
-	}
-	return desc
+	return strings.Join(parts, " · ")
 }
 
 var statusStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
@@ -543,8 +534,6 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 
 	case tea.WindowSizeMsg:
-		a.width = msg.Width
-		a.height = msg.Height
 		if a.screen == screenPicker {
 			a.pickerList.SetSize(msg.Width, msg.Height-4)
 		} else {
@@ -756,8 +745,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 					return authErrMsg{err: err}
 				}
-				selfID, _ := tg.GetSelfID(a.ctx, a.client)
-				return authDoneMsg{selfID: selfID}
+				return authDoneMsg{}
 			}
 		}
 
@@ -771,8 +759,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 					return authErrMsg{err: err}
 				}
-				selfID, _ := tg.GetSelfID(a.ctx, a.client)
-				return authDoneMsg{selfID: selfID}
+				return authDoneMsg{}
 			}
 		}
 
@@ -1000,20 +987,21 @@ func (a App) View() tea.View {
 		v.SetContent(s)
 	case screenGroupList:
 		content := "🧹 tgmsgcleaner v0.1\n\n"
-		filterBar := "  Filter [Tab]: "
+		var filterBar strings.Builder
+		filterBar.WriteString("  Filter [Tab]: ")
 		fc := a.filterCount()
-		for i := 0; i < fc; i++ {
+		for i := range fc {
 			name := filterNames[i]
 			if i == a.filter {
-				filterBar += "[" + name + "]"
+				filterBar.WriteString("[" + name + "]")
 			} else {
-				filterBar += " " + name + " "
+				filterBar.WriteString(" " + name + " ")
 			}
 			if i < len(filterNames)-1 {
-				filterBar += " "
+				filterBar.WriteString(" ")
 			}
 		}
-		content += filterBar + "\n"
+		content += filterBar.String() + "\n"
 		if a.loadingMessages && a.loadTotal > 0 {
 			pct := float64(a.loadedCount) / float64(a.loadTotal)
 			content += fmt.Sprintf("  Counting messages... %d/%d\n", a.loadedCount, a.loadTotal)

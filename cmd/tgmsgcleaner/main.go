@@ -11,10 +11,10 @@ import (
 
 	"context"
 
+	tea "charm.land/bubbletea/v2"
 	"github.com/anik1ng/tgmsgcleaner/internal/config"
 	tg "github.com/anik1ng/tgmsgcleaner/internal/telegram"
 	"github.com/anik1ng/tgmsgcleaner/internal/tui"
-	tea "charm.land/bubbletea/v2"
 )
 
 func main() {
