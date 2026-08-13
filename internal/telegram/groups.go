@@ -191,29 +191,30 @@ type MessageInfo struct {
 	Text string
 }
 
-func FetchMyMessages(ctx context.Context, client *telegram.Client, chat ChatInfo, selfID int64, offsetID int, limit int) ([]MessageInfo, error) {
+func FetchMyMessages(ctx context.Context, client *telegram.Client, chat ChatInfo, selfID int64, offsetID int, limit int) (messages []MessageInfo, nextOffsetID int, hasMore bool, err error) {
 	api := client.API()
+	nextOffsetID = offsetID
 
 	var takeoutID int64
 	if chat.IsLeft {
-		takeout, err := api.AccountInitTakeoutSession(ctx, &tg.AccountInitTakeoutSessionRequest{
+		takeout, e := api.AccountInitTakeoutSession(ctx, &tg.AccountInitTakeoutSessionRequest{
 			MessageMegagroups: true,
 			MessageChannels:   true,
 		})
-		if err != nil {
-			return nil, fmt.Errorf("init takeout: %w", err)
+		if e != nil {
+			return nil, 0, false, fmt.Errorf("init takeout: %w", e)
 		}
 		takeoutID = takeout.ID
 		defer api.AccountFinishTakeoutSession(ctx, &tg.AccountFinishTakeoutSessionRequest{Success: true})
 	}
 
-	rawMessages, err := searchMessagesWithOffset(ctx, api, chat.InputPeer, selfID, takeoutID, offsetID, limit)
-	if err != nil {
-		return nil, fmt.Errorf("fetching messages: %w", err)
+	rawMessages, e := searchMessagesWithOffset(ctx, api, chat.InputPeer, selfID, takeoutID, offsetID, limit)
+	if e != nil {
+		return nil, 0, false, fmt.Errorf("fetching messages: %w", e)
 	}
 
-	var messages []MessageInfo
 	for _, m := range rawMessages {
+		nextOffsetID = m.GetID() // advance by every raw message, including filtered ones
 		msg, ok := m.(*tg.Message)
 		if !ok {
 			continue
@@ -228,7 +229,10 @@ func FetchMyMessages(ctx context.Context, client *telegram.Client, chat ChatInfo
 			Text: text,
 		})
 	}
-	return messages, nil
+	// More pages exist when the server returned a full raw page; decide on the
+	// raw count, not the filtered one, or service messages would truncate history.
+	hasMore = len(rawMessages) == limit
+	return messages, nextOffsetID, hasMore, nil
 }
 
 type DeleteProgress struct {
@@ -287,11 +291,11 @@ func DeleteMyMessages(ctx context.Context, client *telegram.Client, chat ChatInf
 
 		nextOffset := offsetID
 		for _, m := range rawMsgs {
+			nextOffset = m.GetID() // advance by every raw message, incl. service/empty ones
 			msg, ok := m.(*tg.Message)
 			if !ok {
 				continue
 			}
-			nextOffset = msg.ID
 			// Safety check: only delete messages we can positively confirm are
 			// ours. The server search already filters by FromID=self, but if a
 			// message carries no confirmable PeerUser author, skip it rather than
@@ -546,13 +550,14 @@ func RemoveMyReactions(ctx context.Context, client *telegram.Client, chat ChatIn
 			break
 		}
 
+		prevOffset := offsetID
 		for _, m := range rawMsgs {
+			offsetID = m.GetID() // advance by every raw message, incl. service/empty ones
 			msg, ok := m.(*tg.Message)
 			if !ok {
 				continue
 			}
 			checked++
-			offsetID = msg.ID
 
 			hasMyReaction := false
 			for _, r := range msg.Reactions.Results {
@@ -578,6 +583,9 @@ func RemoveMyReactions(ctx context.Context, client *telegram.Client, chat ChatIn
 				removed++
 				time.Sleep(300 * time.Millisecond)
 			}
+		}
+		if offsetID == prevOffset {
+			break // no progress, avoid infinite loop
 		}
 
 		if !sendProgress(ctx, progress, ReactionProgress{Checked: checked, Removed: removed}) {
@@ -700,6 +708,7 @@ func ExportMyMessages(ctx context.Context, client *telegram.Client, chat ChatInf
 		}
 		newOffsetID := offsetID
 		for _, m := range rawMsgs {
+			newOffsetID = m.GetID() // advance by every raw message, incl. service/empty ones
 			msg, ok := m.(*tg.Message)
 			if !ok {
 				continue
@@ -710,7 +719,6 @@ func ExportMyMessages(ctx context.Context, client *telegram.Client, chat ChatInf
 			}
 			t := time.Unix(int64(msg.Date), 0)
 			fmt.Fprintf(f, "[%s] %s\n", t.Format("2006-01-02 15:04"), text)
-			newOffsetID = msg.ID
 			exported++
 		}
 		if newOffsetID == offsetID {

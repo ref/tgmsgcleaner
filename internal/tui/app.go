@@ -132,8 +132,9 @@ type msgCountMsg struct {
 }
 type msgCountDoneMsg struct{}
 type messagesLoadedMsg struct {
-	messages []tg.MessageInfo
-	hasMore  bool
+	messages     []tg.MessageInfo
+	nextOffsetID int
+	hasMore      bool
 }
 
 type deleteProgressMsg struct {
@@ -430,13 +431,14 @@ func (a *App) fetchMessagesCmd(offsetID int) tea.Cmd {
 	chat := a.selectedChat
 	selfID := a.selfID
 	return func() tea.Msg {
-		msgs, err := tg.FetchMyMessages(a.ctx, a.client, *chat, selfID, offsetID, 50)
+		msgs, nextOffset, hasMore, err := tg.FetchMyMessages(a.ctx, a.client, *chat, selfID, offsetID, 50)
 		if err != nil {
 			return authErrMsg{err: err}
 		}
 		return messagesLoadedMsg{
-			messages: msgs,
-			hasMore:  len(msgs) == 50,
+			messages:     msgs,
+			nextOffsetID: nextOffset,
+			hasMore:      hasMore,
 		}
 	}
 }
@@ -582,9 +584,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.messages = append(a.messages, msg.messages...)
 		a.hasMore = msg.hasMore
 		a.loadingMore = false
-		if len(msg.messages) > 0 {
-			a.nextOffsetID = msg.messages[len(msg.messages)-1].ID
-		}
+		a.nextOffsetID = msg.nextOffsetID
 		a.msgList.SetItems(a.buildMessageItems())
 		return a, nil
 
