@@ -19,6 +19,16 @@ import (
 	"github.com/gotd/td/telegram/auth"
 )
 
+// Version is the application version shown in the UI. Local builds show
+// "dev"; release builds override it from the git tag via
+// -ldflags "-X github.com/anik1ng/tgmsgcleaner/internal/tui.Version=vX.Y.Z"
+// (see .goreleaser.yaml).
+var Version = "dev"
+
+func appTitle() string {
+	return "🧹 tgmsgcleaner " + Version
+}
+
 const (
 	screenPicker = iota
 	screenAuth
@@ -1003,11 +1013,11 @@ func (a App) View() tea.View {
 
 	switch a.screen {
 	case screenPicker:
-		s := "🧹 tgmsgcleaner v0.1\n\n"
+		s := appTitle() + "\n\n"
 		s += a.pickerList.View()
 		v.SetContent(s)
 	case screenAuth:
-		s := "🧹 tgmsgcleaner v0.1\n\nEnter your Telegram auth code:\n\n" + a.authInput.View() + "\n"
+		s := appTitle() + "\n\nEnter your Telegram auth code:\n\n" + a.authInput.View() + "\n"
 		if a.authErr != "" {
 			s += "\n⚠️  " + a.authErr + "\n"
 		}
@@ -1016,13 +1026,13 @@ func (a App) View() tea.View {
 		}
 		v.SetContent(s)
 	case screenPassword:
-		s := "🧹 tgmsgcleaner v0.1\n\nEnter your 2FA password:\n\n" + a.passInput.View() + "\n"
+		s := appTitle() + "\n\nEnter your 2FA password:\n\n" + a.passInput.View() + "\n"
 		if a.authErr != "" {
 			s += "\n⚠️  " + a.authErr + "\n"
 		}
 		v.SetContent(s)
 	case screenGroupList:
-		content := "🧹 tgmsgcleaner v0.1\n\n"
+		content := appTitle() + "\n\n"
 		var filterBar strings.Builder
 		filterBar.WriteString("  Filter [Tab]: ")
 		fc := a.filterCount()

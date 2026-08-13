@@ -3,6 +3,9 @@ version: 2
 builds:
   - main: ./cmd/tgmsgcleaner
     binary: tgmsgcleaner
+    ldflags:
+      - -s -w
+      - -X github.com/anik1ng/tgmsgcleaner/internal/tui.Version=v{{ .Version }}
     goos:
       - linux
       - darwin
