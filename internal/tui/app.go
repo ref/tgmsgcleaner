@@ -82,6 +82,8 @@ type App struct {
 	nextOffsetID int
 	hasMore      bool
 	loadingMore  bool
+	msgFetchGen  int    // bumped on each view session; stale in-flight fetches are discarded
+	msgErr       string // error shown on the messages screen when a fetch fails
 
 	confirmText    string
 	confirmAction  string
@@ -136,6 +138,11 @@ type messagesLoadedMsg struct {
 	messages     []tg.MessageInfo
 	nextOffsetID int
 	hasMore      bool
+	gen          int
+}
+type messagesErrMsg struct {
+	err error
+	gen int
 }
 
 type deleteProgressMsg struct {
@@ -432,18 +439,19 @@ func (a *App) openActions(chat tg.ChatInfo) {
 	a.actionList.SetItems(items)
 }
 
-func (a *App) fetchMessagesCmd(offsetID int) tea.Cmd {
+func (a *App) fetchMessagesCmd(offsetID int, gen int) tea.Cmd {
 	chat := a.selectedChat
 	selfID := a.selfID
 	return func() tea.Msg {
 		msgs, nextOffset, hasMore, err := tg.FetchMyMessages(a.ctx, a.client, *chat, selfID, offsetID, 50)
 		if err != nil {
-			return authErrMsg{err: err}
+			return messagesErrMsg{err: err, gen: gen}
 		}
 		return messagesLoadedMsg{
 			messages:     msgs,
 			nextOffsetID: nextOffset,
 			hasMore:      hasMore,
+			gen:          gen,
 		}
 	}
 }
@@ -598,11 +606,23 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case messagesLoadedMsg:
+		if msg.gen != a.msgFetchGen {
+			return a, nil // stale fetch from a previous view session — discard
+		}
+		a.msgErr = ""
 		a.messages = append(a.messages, msg.messages...)
 		a.hasMore = msg.hasMore
 		a.loadingMore = false
 		a.nextOffsetID = msg.nextOffsetID
 		a.msgList.SetItems(a.buildMessageItems())
+		return a, nil
+
+	case messagesErrMsg:
+		if msg.gen != a.msgFetchGen {
+			return a, nil // stale fetch from a previous view session — discard
+		}
+		a.msgErr = msg.err.Error()
+		a.loadingMore = false
 		return a, nil
 
 	case deleteProgressMsg:
@@ -842,9 +862,11 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					a.nextOffsetID = 0
 					a.hasMore = true
 					a.loadingMore = true
+					a.msgErr = ""
+					a.msgFetchGen++
 					a.msgList.Title = a.selectedChat.Title + " — Messages"
 					a.msgList.SetItems([]list.Item{})
-					return a, a.fetchMessagesCmd(0)
+					return a, a.fetchMessagesCmd(0, a.msgFetchGen)
 				case "export":
 					count := ""
 					if a.selectedChat.MyMessages >= 0 {
@@ -879,7 +901,8 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				idx := a.msgList.Index()
 				if idx == len(a.msgList.Items())-1 {
 					a.loadingMore = true
-					return a, a.fetchMessagesCmd(a.nextOffsetID)
+					a.msgErr = ""
+					return a, a.fetchMessagesCmd(a.nextOffsetID, a.msgFetchGen)
 				}
 			}
 			return a, nil
@@ -894,6 +917,9 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.String() == "esc" && a.screen == screenMessages {
 			a.screen = screenActions
 			a.messages = nil
+			a.msgErr = ""
+			a.msgFetchGen++ // invalidate any in-flight fetch from this view session
+			a.loadingMore = false
 			return a, nil
 		}
 
@@ -1008,7 +1034,11 @@ func (a App) View() tea.View {
 	case screenActions:
 		v.SetContent(a.actionList.View())
 	case screenMessages:
-		v.SetContent(a.msgList.View())
+		content := a.msgList.View()
+		if a.msgErr != "" {
+			content += "\n  ⚠️  " + a.msgErr + "\n"
+		}
+		v.SetContent(content)
 	case screenConfirm:
 		v.SetContent("\n  " + a.confirmText + "\n")
 	case screenDeleting:
