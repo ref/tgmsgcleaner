@@ -119,6 +119,7 @@ type codeSentMsg struct{ codeHash string }
 type authDoneMsg struct{ selfID int64 }
 type authErrMsg struct{ err error }
 type needPasswordMsg struct{}
+type authRestartMsg struct{}
 type chatsLoadedMsg struct {
 	chats  []tg.ChatInfo
 	selfID int64
@@ -270,18 +271,22 @@ func NewPickerApp(accounts []string) App {
 
 func (a App) Init() tea.Cmd {
 	if a.screen == screenAuth {
-		return func() tea.Msg {
-			codeHash, err := tg.SendCode(a.ctx, a.client, a.phone, a.sessionPath)
-			if err != nil {
-				return authErrMsg{err: err}
-			}
-			return codeSentMsg{codeHash: codeHash}
-		}
+		return a.sendCodeCmd()
 	}
 	if a.screen == screenGroupList {
 		return a.loadChatsCmd()
 	}
 	return nil
+}
+
+func (a *App) sendCodeCmd() tea.Cmd {
+	return func() tea.Msg {
+		codeHash, err := tg.SendCode(a.ctx, a.client, a.phone, a.sessionPath)
+		if err != nil {
+			return authErrMsg{err: err}
+		}
+		return codeSentMsg{codeHash: codeHash}
+	}
 }
 
 func (a *App) loadChatsCmd() tea.Cmd {
@@ -544,7 +549,19 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case codeSentMsg:
 		a.codeHash = msg.codeHash
+		a.authErr = ""
 		return a, nil
+
+	case authRestartMsg:
+		// Telegram reset the auth flow; the session was already cleared. Return
+		// to the code screen and request a fresh code.
+		a.screen = screenAuth
+		a.codeHash = ""
+		a.authInput.SetValue("")
+		a.authInput.Focus()
+		a.passInput.SetValue("")
+		a.authErr = "Session was reset — sending a new code..."
+		return a, a.sendCodeCmd()
 
 	case authDoneMsg:
 		return a, a.loadChatsCmd()
@@ -709,10 +726,13 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.String() == "enter" && a.screen == screenAuth {
 			code := a.authInput.Value()
 			return a, func() tea.Msg {
-				err := tg.SignIn(a.ctx, a.client, a.phone, code, a.codeHash)
+				err := tg.SignIn(a.ctx, a.client, a.phone, code, a.codeHash, a.sessionPath)
 				if err != nil {
 					if errors.Is(err, auth.ErrPasswordAuthNeeded) {
 						return needPasswordMsg{}
+					}
+					if errors.Is(err, tg.ErrAuthRestart) {
+						return authRestartMsg{}
 					}
 					return authErrMsg{err: err}
 				}
@@ -724,8 +744,11 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.String() == "enter" && a.screen == screenPassword {
 			password := a.passInput.Value()
 			return a, func() tea.Msg {
-				err := tg.CheckPassword(a.ctx, a.client, password)
+				err := tg.CheckPassword(a.ctx, a.client, password, a.sessionPath)
 				if err != nil {
+					if errors.Is(err, tg.ErrAuthRestart) {
+						return authRestartMsg{}
+					}
 					return authErrMsg{err: err}
 				}
 				selfID, _ := tg.GetSelfID(a.ctx, a.client)
