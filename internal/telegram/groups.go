@@ -35,7 +35,11 @@ func GetChats(ctx context.Context, client *telegram.Client) ([]ChatInfo, error) 
 	api := client.API()
 
 	var allChats []ChatInfo
-	seen := make(map[int64]bool)
+	// Separate dedup spaces: raw MTProto chat.ID (basic groups) and channel.ID
+	// (channels/supergroups) are independent, so the same number in each is a
+	// different chat and must not collide.
+	seenChats := make(map[int64]bool)
+	seenChannels := make(map[int64]bool)
 	offsetDate := 0
 	offsetID := 0
 	var offsetPeer tg.InputPeerClass = &tg.InputPeerEmpty{}
@@ -79,10 +83,10 @@ func GetChats(ctx context.Context, client *telegram.Client) ([]ChatInfo, error) 
 			switch chat := c.(type) {
 			case *tg.Chat:
 				id := int64(chat.ID)
-				if seen[id] || chat.Deactivated || chat.Left {
+				if seenChats[id] || chat.Deactivated || chat.Left {
 					continue
 				}
-				seen[id] = true
+				seenChats[id] = true
 				allChats = append(allChats, ChatInfo{
 					Title:       chat.Title,
 					ID:          id,
@@ -93,10 +97,10 @@ func GetChats(ctx context.Context, client *telegram.Client) ([]ChatInfo, error) 
 				})
 			case *tg.Channel:
 				channelMap[chat.ID] = chat
-				if seen[chat.ID] || chat.Left {
+				if seenChannels[chat.ID] || chat.Left {
 					continue
 				}
-				seen[chat.ID] = true
+				seenChannels[chat.ID] = true
 				ct := ChatTypeChannel
 				if chat.Megagroup {
 					ct = ChatTypeSupergroup

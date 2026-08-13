@@ -105,6 +105,7 @@ func (a accountItem) Description() string { return "" }
 func (a accountItem) FilterValue() string { return a.phone }
 
 type Group struct {
+	id         int64
 	title      string
 	desc       string
 	chatType   tg.ChatType
@@ -336,6 +337,7 @@ func (a *App) applyFilter() {
 			}
 		}
 		items = append(items, Group{
+			id:         c.ID,
 			title:      c.Title,
 			desc:       formatDescription(c),
 			chatType:   c.Type,
@@ -593,7 +595,9 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if a.selectedChat != nil {
 				a.selectedChat.MyMessages = 0
 				for i := range a.allChats {
-					if a.allChats[i].ID == a.selectedChat.ID {
+					// (ID, Type) is the unique key: raw chat.ID and channel.ID are
+					// separate spaces, so match both or we may zero the wrong row.
+					if a.allChats[i].ID == a.selectedChat.ID && a.allChats[i].Type == a.selectedChat.Type {
 						a.allChats[i].MyMessages = 0
 						break
 					}
@@ -654,7 +658,9 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case leftGroupMsg:
 		for i, c := range a.allChats {
-			if a.selectedChat != nil && c.ID == a.selectedChat.ID {
+			// Match on (ID, Type): raw chat.ID and channel.ID are separate spaces,
+			// so the same number can be both a basic group and a channel.
+			if a.selectedChat != nil && c.ID == a.selectedChat.ID && c.Type == a.selectedChat.Type {
 				a.allChats = append(a.allChats[:i], a.allChats[i+1:]...)
 				break
 			}
@@ -783,7 +789,10 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return a, nil
 				}
 				for _, c := range a.allChats {
-					if c.Title == item.title && c.Type == item.chatType {
+					// (ID, Type) is the unique key: raw MTProto chat.ID and
+					// channel.ID are separate spaces, so the same number can be
+					// both a basic group and a channel.
+					if c.ID == item.id && c.Type == item.chatType {
 						a.openActions(c)
 						break
 					}
