@@ -200,22 +200,7 @@ func FetchMyMessages(ctx context.Context, client *telegram.Client, chat ChatInfo
 		if e != nil {
 			return fmt.Errorf("fetching messages: %w", e)
 		}
-		for _, m := range rawMessages {
-			nextOffsetID = m.GetID() // advance by every raw message, including filtered ones
-			msg, ok := m.(*tg.Message)
-			if !ok {
-				continue
-			}
-			text := msg.Message
-			if text == "" {
-				text = "[media]"
-			}
-			messages = append(messages, MessageInfo{
-				ID:   msg.ID,
-				Date: msg.Date,
-				Text: text,
-			})
-		}
+		messages, nextOffsetID = toMessageInfos(rawMessages, offsetID)
 		// More pages exist when the server returned a full raw page; decide on the
 		// raw count, not the filtered one, or service messages would truncate history.
 		hasMore = len(rawMessages) == limit
@@ -225,6 +210,70 @@ func FetchMyMessages(ctx context.Context, client *telegram.Client, chat ChatInfo
 		return nil, 0, false, err
 	}
 	return messages, nextOffsetID, hasMore, nil
+}
+
+// toMessageInfos converts a raw search page to MessageInfo entries, skipping
+// service/empty items, and returns the pagination cursor advanced over every
+// raw message (including the skipped ones, so a service-message tail cannot
+// stall pagination).
+func toMessageInfos(rawMsgs []tg.MessageClass, offsetID int) ([]MessageInfo, int) {
+	nextOffset := offsetID
+	var infos []MessageInfo
+	for _, m := range rawMsgs {
+		nextOffset = m.GetID() // advance by every raw message, including filtered ones
+		msg, ok := m.(*tg.Message)
+		if !ok {
+			continue
+		}
+		text := msg.Message
+		if text == "" {
+			text = "[media]"
+		}
+		infos = append(infos, MessageInfo{
+			ID:   msg.ID,
+			Date: msg.Date,
+			Text: text,
+		})
+	}
+	return infos, nextOffset
+}
+
+// collectDeletableIDs returns the IDs from a raw search page that are safe to
+// delete, and the pagination cursor advanced over every raw message. Safety
+// check: only messages we can positively confirm are ours are collected. The
+// server search already filters by FromID=self, but if a message carries no
+// confirmable PeerUser author, it is skipped rather than risk deleting someone
+// else's message.
+func collectDeletableIDs(rawMsgs []tg.MessageClass, selfID int64, offsetID int) (ids []int, nextOffset int) {
+	nextOffset = offsetID
+	for _, m := range rawMsgs {
+		nextOffset = m.GetID() // advance by every raw message, incl. service/empty ones
+		msg, ok := m.(*tg.Message)
+		if !ok {
+			continue
+		}
+		fromID, ok := msg.GetFromID()
+		if !ok {
+			continue
+		}
+		peer, ok := fromID.(*tg.PeerUser)
+		if !ok || peer.UserID != selfID {
+			continue
+		}
+		ids = append(ids, msg.ID)
+	}
+	return ids, nextOffset
+}
+
+// hasOwnReaction reports whether the message carries a reaction chosen by the
+// current user (Telegram marks own reactions with ChosenOrder).
+func hasOwnReaction(msg *tg.Message) bool {
+	for _, r := range msg.Reactions.Results {
+		if _, ok := r.GetChosenOrder(); ok {
+			return true
+		}
+	}
+	return false
 }
 
 type DeleteProgress struct {
@@ -295,27 +344,8 @@ func DeleteMyMessages(ctx context.Context, client *telegram.Client, chat ChatInf
 				break
 			}
 
-			nextOffset := offsetID
-			for _, m := range rawMsgs {
-				nextOffset = m.GetID() // advance by every raw message, incl. service/empty ones
-				msg, ok := m.(*tg.Message)
-				if !ok {
-					continue
-				}
-				// Safety check: only delete messages we can positively confirm are
-				// ours. The server search already filters by FromID=self, but if a
-				// message carries no confirmable PeerUser author, skip it rather than
-				// risk deleting someone else's message.
-				fromID, ok := msg.GetFromID()
-				if !ok {
-					continue
-				}
-				peer, ok := fromID.(*tg.PeerUser)
-				if !ok || peer.UserID != selfID {
-					continue
-				}
-				ids = append(ids, msg.ID)
-			}
+			pageIDs, nextOffset := collectDeletableIDs(rawMsgs, selfID, offsetID)
+			ids = append(ids, pageIDs...)
 
 			if !sendProgress(ctx, progress, DeleteProgress{Deleted: 0, Total: len(ids)}) {
 				return ctx.Err()
@@ -565,15 +595,7 @@ func RemoveMyReactions(ctx context.Context, client *telegram.Client, chat ChatIn
 			}
 			checked++
 
-			hasMyReaction := false
-			for _, r := range msg.Reactions.Results {
-				if _, ok := r.GetChosenOrder(); ok {
-					hasMyReaction = true
-					break
-				}
-			}
-
-			if hasMyReaction {
+			if hasOwnReaction(msg) {
 				err := retryFlood(ctx, func() error {
 					_, e := api.MessagesSendReaction(ctx, &tg.MessagesSendReactionRequest{
 						Peer:     chat.InputPeer,
