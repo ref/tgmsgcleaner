@@ -238,6 +238,20 @@ type DeleteProgress struct {
 	Err     error
 }
 
+// sendProgress sends v on ch unless ctx is cancelled first. Returns false if
+// the send was abandoned because ctx was cancelled (e.g. the TUI quit mid-op),
+// signalling the caller to stop so its deferred close(ch) can run. Without this,
+// a background sender blocks forever on a full channel once the consumer stops
+// reading, leaking the goroutine across account switches.
+func sendProgress[T any](ctx context.Context, ch chan<- T, v T) bool {
+	select {
+	case ch <- v:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
 func DeleteMyMessages(ctx context.Context, client *telegram.Client, chat ChatInfo, selfID int64, progress chan<- DeleteProgress) {
 	defer close(progress)
 	api := client.API()
@@ -249,7 +263,7 @@ func DeleteMyMessages(ctx context.Context, client *telegram.Client, chat ChatInf
 			MessageChannels:   true,
 		})
 		if err != nil {
-			progress <- DeleteProgress{Err: fmt.Errorf("init takeout: %w", err)}
+			sendProgress(ctx, progress, DeleteProgress{Err: fmt.Errorf("init takeout: %w", err)})
 			return
 		}
 		takeoutID = takeout.ID
@@ -264,7 +278,7 @@ func DeleteMyMessages(ctx context.Context, client *telegram.Client, chat ChatInf
 	for {
 		rawMsgs, err := searchMessagesWithOffset(ctx, api, chat.InputPeer, selfID, takeoutID, offsetID, 100)
 		if err != nil {
-			progress <- DeleteProgress{Err: err}
+			sendProgress(ctx, progress, DeleteProgress{Err: err})
 			return
 		}
 		if len(rawMsgs) == 0 {
@@ -286,7 +300,9 @@ func DeleteMyMessages(ctx context.Context, client *telegram.Client, chat ChatInf
 			ids = append(ids, msg.ID)
 		}
 
-		progress <- DeleteProgress{Deleted: 0, Total: len(ids)}
+		if !sendProgress(ctx, progress, DeleteProgress{Deleted: 0, Total: len(ids)}) {
+			return
+		}
 
 		if len(rawMsgs) < 100 {
 			break
@@ -300,7 +316,7 @@ func DeleteMyMessages(ctx context.Context, client *telegram.Client, chat ChatInf
 
 	total := len(ids)
 	if total == 0 {
-		progress <- DeleteProgress{Done: true}
+		sendProgress(ctx, progress, DeleteProgress{Done: true})
 		return
 	}
 
@@ -338,24 +354,42 @@ func DeleteMyMessages(ctx context.Context, client *telegram.Client, chat ChatInf
 		}
 		if err != nil {
 			if wait, ok := tgerr.AsFloodWait(err); ok {
-				time.Sleep(wait + time.Second)
+				if !sleepCtx(ctx, wait+time.Second) {
+					return // ctx cancelled; deferred cleanup runs
+				}
 				continue // retry same chunk
 			}
 			if tgerr.Is(err, "CHANNEL_PRIVATE") {
-				progress <- DeleteProgress{Deleted: deleted, Total: total, Err: fmt.Errorf("channel is private or deleted — messages can be viewed but not deleted")}
+				sendProgress(ctx, progress, DeleteProgress{Deleted: deleted, Total: total, Err: fmt.Errorf("channel is private or deleted — messages can be viewed but not deleted")})
 				return
 			}
-			progress <- DeleteProgress{Deleted: deleted, Total: total, Err: err}
+			sendProgress(ctx, progress, DeleteProgress{Deleted: deleted, Total: total, Err: err})
 			return
 		}
 
 		deleted += len(chunk)
-		progress <- DeleteProgress{Deleted: deleted, Total: total}
+		if !sendProgress(ctx, progress, DeleteProgress{Deleted: deleted, Total: total}) {
+			return
+		}
 		i = end
 		time.Sleep(300 * time.Millisecond)
 	}
 
-	progress <- DeleteProgress{Deleted: deleted, Total: total, Done: true}
+	sendProgress(ctx, progress, DeleteProgress{Deleted: deleted, Total: total, Done: true})
+}
+
+// sleepCtx waits for d, returning false if ctx is cancelled first. Used so a
+// long FLOOD_WAIT back-off does not hang a background worker for minutes after
+// the operation has already been cancelled (TUI quit / account switch).
+func sleepCtx(ctx context.Context, d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-t.C:
+		return true
+	case <-ctx.Done():
+		return false
+	}
 }
 
 func invokeWithRetry(ctx context.Context, api *tg.Client, takeoutID int64, req tg.MessagesSearchRequest, result *tg.MessagesMessagesBox) error {
@@ -377,7 +411,9 @@ func invokeWithRetry(ctx context.Context, api *tg.Client, takeoutID int64, req t
 		}
 		if err != nil {
 			if wait, ok := tgerr.AsFloodWait(err); ok {
-				time.Sleep(wait + time.Second)
+				if !sleepCtx(ctx, wait+time.Second) {
+					return ctx.Err()
+				}
 				continue
 			}
 			return err
@@ -388,12 +424,15 @@ func invokeWithRetry(ctx context.Context, api *tg.Client, takeoutID int64, req t
 
 // retryFlood runs fn, waiting out FLOOD_WAIT errors and retrying until it
 // succeeds or returns a non-flood error. Used for API calls that don't go
-// through invokeWithRetry (which is specific to MessagesSearchRequest).
-func retryFlood(fn func() error) error {
+// through invokeWithRetry (which is specific to MessagesSearchRequest). The
+// back-off is interrupted if ctx is cancelled.
+func retryFlood(ctx context.Context, fn func() error) error {
 	for {
 		err := fn()
 		if wait, ok := tgerr.AsFloodWait(err); ok {
-			time.Sleep(wait + time.Second)
+			if !sleepCtx(ctx, wait+time.Second) {
+				return ctx.Err()
+			}
 			continue
 		}
 		return err
@@ -472,7 +511,7 @@ func RemoveMyReactions(ctx context.Context, client *telegram.Client, chat ChatIn
 
 	for {
 		var historyResult tg.MessagesMessagesClass
-		err := retryFlood(func() error {
+		err := retryFlood(ctx, func() error {
 			var e error
 			historyResult, e = api.MessagesGetHistory(ctx, &tg.MessagesGetHistoryRequest{
 				Peer:     chat.InputPeer,
@@ -482,7 +521,7 @@ func RemoveMyReactions(ctx context.Context, client *telegram.Client, chat ChatIn
 			return e
 		})
 		if err != nil {
-			progress <- ReactionProgress{Checked: checked, Removed: removed, Err: err}
+			sendProgress(ctx, progress, ReactionProgress{Checked: checked, Removed: removed, Err: err})
 			return
 		}
 
@@ -517,7 +556,7 @@ func RemoveMyReactions(ctx context.Context, client *telegram.Client, chat ChatIn
 			}
 
 			if hasMyReaction {
-				err := retryFlood(func() error {
+				err := retryFlood(ctx, func() error {
 					_, e := api.MessagesSendReaction(ctx, &tg.MessagesSendReactionRequest{
 						Peer:     chat.InputPeer,
 						MsgID:    msg.ID,
@@ -526,7 +565,7 @@ func RemoveMyReactions(ctx context.Context, client *telegram.Client, chat ChatIn
 					return e
 				})
 				if err != nil {
-					progress <- ReactionProgress{Checked: checked, Removed: removed, Err: err}
+					sendProgress(ctx, progress, ReactionProgress{Checked: checked, Removed: removed, Err: err})
 					return
 				}
 				removed++
@@ -534,11 +573,13 @@ func RemoveMyReactions(ctx context.Context, client *telegram.Client, chat ChatIn
 			}
 		}
 
-		progress <- ReactionProgress{Checked: checked, Removed: removed}
+		if !sendProgress(ctx, progress, ReactionProgress{Checked: checked, Removed: removed}) {
+			return
+		}
 		time.Sleep(200 * time.Millisecond)
 	}
 
-	progress <- ReactionProgress{Checked: checked, Removed: removed, Done: true}
+	sendProgress(ctx, progress, ReactionProgress{Checked: checked, Removed: removed, Done: true})
 }
 
 func LeaveChat(ctx context.Context, client *telegram.Client, chat ChatInfo, selfID int64) error {
@@ -576,11 +617,13 @@ func CountAllMyMessages(ctx context.Context, client *telegram.Client, chats []Ch
 	defer close(progress)
 	for i, chat := range chats {
 		count, err := CountMyMessages(ctx, client, chat.InputPeer, selfID)
-		progress <- MessageCountProgress{
+		if !sendProgress(ctx, progress, MessageCountProgress{
 			ChatIndex: i,
 			Count:     count,
 			Total:     len(chats),
 			Err:       err,
+		}) {
+			return
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
@@ -610,7 +653,7 @@ func ExportMyMessages(ctx context.Context, client *telegram.Client, chat ChatInf
 			MessageChannels:   true,
 		})
 		if err != nil {
-			progress <- ExportProgress{Err: fmt.Errorf("init takeout: %w", err)}
+			sendProgress(ctx, progress, ExportProgress{Err: fmt.Errorf("init takeout: %w", err)})
 			return
 		}
 		takeoutID = takeout.ID
@@ -619,18 +662,18 @@ func ExportMyMessages(ctx context.Context, client *telegram.Client, chat ChatInf
 
 	total, err := countMessages(ctx, api, chat.InputPeer, selfID, takeoutID)
 	if err != nil {
-		progress <- ExportProgress{Err: err}
+		sendProgress(ctx, progress, ExportProgress{Err: err})
 		return
 	}
 	if total == 0 {
-		progress <- ExportProgress{Done: true}
+		sendProgress(ctx, progress, ExportProgress{Done: true})
 		return
 	}
 
 	filename := sanitizeFilename(chat.Title) + " (" + phone + ").txt"
 	f, err := os.Create(filename)
 	if err != nil {
-		progress <- ExportProgress{Err: fmt.Errorf("create file: %w", err)}
+		sendProgress(ctx, progress, ExportProgress{Err: fmt.Errorf("create file: %w", err)})
 		return
 	}
 	defer f.Close()
@@ -642,7 +685,7 @@ func ExportMyMessages(ctx context.Context, client *telegram.Client, chat ChatInf
 	for {
 		rawMsgs, err := searchMessagesWithOffset(ctx, api, chat.InputPeer, selfID, takeoutID, offsetID, 100)
 		if err != nil {
-			progress <- ExportProgress{Exported: exported, Total: total, Err: err}
+			sendProgress(ctx, progress, ExportProgress{Exported: exported, Total: total, Err: err})
 			return
 		}
 		if len(rawMsgs) == 0 {
@@ -667,11 +710,13 @@ func ExportMyMessages(ctx context.Context, client *telegram.Client, chat ChatInf
 			break // no progress, avoid infinite loop
 		}
 		offsetID = newOffsetID
-		progress <- ExportProgress{Exported: exported, Total: total}
+		if !sendProgress(ctx, progress, ExportProgress{Exported: exported, Total: total}) {
+			return
+		}
 		time.Sleep(200 * time.Millisecond)
 	}
 
-	progress <- ExportProgress{Exported: exported, Total: total, Done: true, FilePath: filename}
+	sendProgress(ctx, progress, ExportProgress{Exported: exported, Total: total, Done: true, FilePath: filename})
 }
 
 type LeftChannelsProgress struct {
@@ -690,7 +735,7 @@ func GetLeftChannels(ctx context.Context, client *telegram.Client, selfID int64,
 		MessageChannels:   true,
 	})
 	if err != nil {
-		progress <- LeftChannelsProgress{Err: fmt.Errorf("init takeout: %w", err)}
+		sendProgress(ctx, progress, LeftChannelsProgress{Err: fmt.Errorf("init takeout: %w", err)})
 		return
 	}
 
@@ -705,7 +750,7 @@ func GetLeftChannels(ctx context.Context, client *telegram.Client, selfID int64,
 			Query:     &tg.ChannelsGetLeftChannelsRequest{Offset: offset},
 		}, &result)
 		if err != nil {
-			progress <- LeftChannelsProgress{Chats: allChats, Found: len(allChats), Err: fmt.Errorf("get left channels: %w", err)}
+			sendProgress(ctx, progress, LeftChannelsProgress{Chats: allChats, Found: len(allChats), Err: fmt.Errorf("get left channels: %w", err)})
 			api.AccountFinishTakeoutSession(ctx, &tg.AccountFinishTakeoutSessionRequest{Success: false})
 			return
 		}
@@ -748,7 +793,9 @@ func GetLeftChannels(ctx context.Context, client *telegram.Client, selfID int64,
 		}
 
 		offset += len(chatList)
-		progress <- LeftChannelsProgress{Chats: allChats, Found: len(allChats)}
+		if !sendProgress(ctx, progress, LeftChannelsProgress{Chats: allChats, Found: len(allChats)}) {
+			return
+		}
 		time.Sleep(200 * time.Millisecond)
 	}
 
@@ -760,10 +807,12 @@ func GetLeftChannels(ctx context.Context, client *telegram.Client, selfID int64,
 			continue // skip channels where counting genuinely fails (e.g. CHANNEL_PRIVATE)
 		}
 		allChats[i].MyMessages = count
-		progress <- LeftChannelsProgress{Chats: allChats, Found: len(allChats)}
+		if !sendProgress(ctx, progress, LeftChannelsProgress{Chats: allChats, Found: len(allChats)}) {
+			return
+		}
 		time.Sleep(200 * time.Millisecond)
 	}
 
 	api.AccountFinishTakeoutSession(ctx, &tg.AccountFinishTakeoutSessionRequest{Success: true})
-	progress <- LeftChannelsProgress{Chats: allChats, Found: len(allChats), Done: true}
+	sendProgress(ctx, progress, LeftChannelsProgress{Chats: allChats, Found: len(allChats), Done: true})
 }
