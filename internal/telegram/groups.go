@@ -292,10 +292,17 @@ func DeleteMyMessages(ctx context.Context, client *telegram.Client, chat ChatInf
 				continue
 			}
 			nextOffset = msg.ID
-			if fromID, ok := msg.GetFromID(); ok {
-				if peer, ok := fromID.(*tg.PeerUser); ok && peer.UserID != selfID {
-					continue
-				}
+			// Safety check: only delete messages we can positively confirm are
+			// ours. The server search already filters by FromID=self, but if a
+			// message carries no confirmable PeerUser author, skip it rather than
+			// risk deleting someone else's message.
+			fromID, ok := msg.GetFromID()
+			if !ok {
+				continue
+			}
+			peer, ok := fromID.(*tg.PeerUser)
+			if !ok || peer.UserID != selfID {
+				continue
 			}
 			ids = append(ids, msg.ID)
 		}
