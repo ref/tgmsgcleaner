@@ -691,9 +691,18 @@ func ExportMyMessages(ctx context.Context, client *telegram.Client, chat ChatInf
 		sendProgress(ctx, progress, ExportProgress{Err: fmt.Errorf("create file: %w", err)})
 		return
 	}
-	defer f.Close()
+	success := false
+	defer func() {
+		f.Close() // idempotent; the checked Close is the explicit one below
+		if !success {
+			os.Remove(filename) // don't leave a partial/corrupt export behind
+		}
+	}()
 
-	fmt.Fprintf(f, "Export: %s\nAccount: %s\nDate: %s\nMessages: %d\n\n", chat.Title, phone, time.Now().Format("2006-01-02 15:04"), total)
+	if _, err := fmt.Fprintf(f, "Export: %s\nAccount: %s\nDate: %s\nMessages: %d\n\n", chat.Title, phone, time.Now().Format("2006-01-02 15:04"), total); err != nil {
+		sendProgress(ctx, progress, ExportProgress{Err: fmt.Errorf("write file: %w", err)})
+		return
+	}
 
 	exported := 0
 	offsetID := 0
@@ -718,7 +727,10 @@ func ExportMyMessages(ctx context.Context, client *telegram.Client, chat ChatInf
 				text = "[media]"
 			}
 			t := time.Unix(int64(msg.Date), 0)
-			fmt.Fprintf(f, "[%s] %s\n", t.Format("2006-01-02 15:04"), text)
+			if _, err := fmt.Fprintf(f, "[%s] %s\n", t.Format("2006-01-02 15:04"), text); err != nil {
+				sendProgress(ctx, progress, ExportProgress{Exported: exported, Total: total, Err: fmt.Errorf("write file: %w", err)})
+				return
+			}
 			exported++
 		}
 		if newOffsetID == offsetID {
@@ -731,6 +743,11 @@ func ExportMyMessages(ctx context.Context, client *telegram.Client, chat ChatInf
 		time.Sleep(200 * time.Millisecond)
 	}
 
+	if err := f.Close(); err != nil {
+		sendProgress(ctx, progress, ExportProgress{Exported: exported, Total: total, Err: fmt.Errorf("close file: %w", err)})
+		return
+	}
+	success = true
 	sendProgress(ctx, progress, ExportProgress{Exported: exported, Total: total, Done: true, FilePath: filename})
 }
 
