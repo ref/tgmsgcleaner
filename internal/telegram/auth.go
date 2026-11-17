@@ -8,6 +8,7 @@ import (
 
 	"github.com/gotd/td/telegram"
 	"github.com/gotd/td/telegram/auth"
+	"github.com/gotd/td/telegram/auth/qrlogin"
 	"github.com/gotd/td/tg"
 	"github.com/gotd/td/tgerr"
 )
@@ -78,6 +79,36 @@ func describeDelivery(t tg.AuthSentCodeTypeClass) string {
 		return fmt.Sprintf("Code (%d digits) sent to your login email %s", t.Length, t.EmailPattern)
 	default:
 		return fmt.Sprintf("Code sent (delivery type %T)", t)
+	}
+}
+
+// QRProgress reports the state of a QR login.
+type QRProgress struct {
+	URL  string // tg://login URL to show as a QR code; sent again when the token is refreshed
+	Done bool
+	Err  error // auth.ErrPasswordAuthNeeded when the account has 2FA enabled
+}
+
+// QRLogin shows login tokens on ch until the user accepts one on a device
+// where the account is already signed in. It closes ch when it returns.
+func QRLogin(ctx context.Context, client *telegram.Client, loggedIn qrlogin.LoggedIn, ch chan<- QRProgress) {
+	defer close(ch)
+	_, err := client.QR().Auth(ctx, loggedIn, func(ctx context.Context, token qrlogin.Token) error {
+		select {
+		case ch <- QRProgress{URL: token.URL()}:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	})
+	if tgerr.Is(err, "SESSION_PASSWORD_NEEDED") {
+		err = auth.ErrPasswordAuthNeeded
+	} else if err != nil {
+		err = fmt.Errorf("qr login: %w", err)
+	}
+	select {
+	case ch <- QRProgress{Done: true, Err: err}:
+	case <-ctx.Done():
 	}
 }
 

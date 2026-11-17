@@ -81,14 +81,14 @@ func main() {
 		accounts, _ := config.ListAccounts()
 
 		exitAction := ""
-		client := tg.NewClient(cfg.APIID, cfg.APIHash, sessionPath)
+		client, loggedIn := tg.NewClient(cfg.APIID, cfg.APIHash, sessionPath)
 		runErr := client.Run(context.Background(), func(ctx context.Context) error {
 			isAuth, err := tg.IsAuthorized(ctx, client)
 			if err != nil {
 				return fmt.Errorf("check auth status: %w", err)
 			}
 
-			app := tui.NewApp(client, ctx, phone, sessionPath, isAuth, len(accounts))
+			app := tui.NewApp(client, loggedIn, ctx, phone, sessionPath, isAuth, len(accounts))
 			finalModel, err := tea.NewProgram(app).Run()
 			if err != nil {
 				return fmt.Errorf("run TUI: %w", err)

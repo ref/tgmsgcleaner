@@ -12,7 +12,7 @@ import (
 
 func newTestApp(t *testing.T) App {
 	t.Helper()
-	return NewApp(nil, context.Background(), "+70000000000", "/tmp/nonexistent-session", true, 1)
+	return NewApp(nil, nil, context.Background(), "+70000000000", "/tmp/nonexistent-session", true, 1)
 }
 
 func update(t *testing.T, a App, msg any) App {
@@ -238,5 +238,64 @@ func TestPickerAddAccount(t *testing.T) {
 	a = press(t, a, tea.KeyPressMsg{Code: 'a', Text: "a"})
 	if a.ExitAction != "add" {
 		t.Errorf("ExitAction = %q, want add", a.ExitAction)
+	}
+}
+
+func newAuthApp(t *testing.T) App {
+	t.Helper()
+	return NewApp(nil, nil, context.Background(), "+70000000000", "/tmp/nonexistent-session", false, 1)
+}
+
+func TestAuthChooseDoesNotRequestCode(t *testing.T) {
+	a := newAuthApp(t)
+	if cmd := a.Init(); cmd != nil {
+		t.Error("Init on the auth screen returned a command; no code should be requested before the user chooses")
+	}
+	// Typing on the choice screen must not leak into the code input.
+	a = press(t, a, tea.KeyPressMsg{Code: '1', Text: "1"})
+	if a.authInput.Value() != "" || a.authMode != authModeChoose {
+		t.Errorf("input = %q, mode = %d; want empty input and choice mode", a.authInput.Value(), a.authMode)
+	}
+	a = press(t, a, tea.KeyPressMsg{Code: 'c', Text: "c"})
+	if a.authMode != authModeCode {
+		t.Errorf("after 'c' mode = %d, want code mode", a.authMode)
+	}
+	a = press(t, a, tea.KeyPressMsg{Code: tea.KeyEscape})
+	if a.authMode != authModeChoose {
+		t.Errorf("after esc mode = %d, want choice mode", a.authMode)
+	}
+}
+
+func TestQRMessages(t *testing.T) {
+	a := newAuthApp(t)
+	a.authMode = authModeQR
+	a.qrGen = 3
+
+	// A token from the current login is rendered and keeps listening.
+	model, cmd := a.Update(qrMsg{url: "tg://login?token=abc", gen: 3, next: func() tea.Msg { return nil }})
+	a = model.(App)
+	if a.qrText == "" || cmd == nil {
+		t.Fatalf("qrText empty = %v, cmd nil = %v; want rendered code and next cmd", a.qrText == "", cmd == nil)
+	}
+
+	// Messages from a cancelled login are dropped.
+	model, cmd = a.Update(qrMsg{done: true, err: errors.New("old"), gen: 2})
+	a = model.(App)
+	if cmd != nil || a.authErr != "" {
+		t.Errorf("stale message changed state: cmd nil = %v, authErr = %q", cmd == nil, a.authErr)
+	}
+
+	// A cancelled login must not be treated as a successful sign-in.
+	model, cmd = a.Update(qrMsg{done: true, err: context.Canceled, gen: 3})
+	a = model.(App)
+	if cmd != nil {
+		t.Error("cancelled QR login returned a command, want none")
+	}
+
+	// A failed login returns to the choice screen with the error shown.
+	a.authMode = authModeQR
+	a = update(t, a, qrMsg{done: true, err: errors.New("boom"), gen: a.qrGen})
+	if a.authMode != authModeChoose || a.authErr != "boom" {
+		t.Errorf("mode = %d, authErr = %q; want choice mode and error", a.authMode, a.authErr)
 	}
 }
