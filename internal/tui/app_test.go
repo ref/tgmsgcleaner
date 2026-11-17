@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"charm.land/bubbles/v2/list"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
@@ -14,7 +15,7 @@ import (
 
 func newTestApp(t *testing.T) App {
 	t.Helper()
-	return NewApp(nil, nil, context.Background(), "+70000000000", "/tmp/nonexistent-session", true, 1)
+	return NewApp(nil, nil, context.Background(), "+70000000000", "/tmp/nonexistent-session", true)
 }
 
 func update(t *testing.T, a App, msg any) App {
@@ -243,9 +244,38 @@ func TestPickerAddAccount(t *testing.T) {
 	}
 }
 
+func TestSwitchAccountWorksWithOneAccount(t *testing.T) {
+	a := newTestApp(t)
+	a = press(t, a, tea.KeyPressMsg{Code: 's', Text: "s"})
+	if a.ExitAction != "switch" {
+		t.Errorf("ExitAction = %q, want switch", a.ExitAction)
+	}
+}
+
+func TestSearchInputDoesNotTriggerHotkeys(t *testing.T) {
+	a := newTestApp(t)
+	a.allChats = []tg.ChatInfo{{ID: 1, Title: "alpha", Type: tg.ChatTypeGroup}}
+	a.applyFilter()
+
+	a = press(t, a, tea.KeyPressMsg{Code: '/', Text: "/"})
+	if a.list.FilterState() != list.Filtering {
+		t.Fatalf("filter state = %v, want filtering", a.list.FilterState())
+	}
+	// "a", "s" and "l" are hotkeys on this screen, but here they are a query.
+	for _, r := range "asl" {
+		a = press(t, a, tea.KeyPressMsg{Code: r, Text: string(r)})
+	}
+	if a.ExitAction != "" || a.loadingLeft {
+		t.Errorf("typing a query fired a hotkey: ExitAction = %q, loadingLeft = %v", a.ExitAction, a.loadingLeft)
+	}
+	if got := a.list.FilterValue(); got != "asl" {
+		t.Errorf("filter value = %q, want %q", got, "asl")
+	}
+}
+
 func newAuthApp(t *testing.T) App {
 	t.Helper()
-	return NewApp(nil, nil, context.Background(), "+70000000000", "/tmp/nonexistent-session", false, 1)
+	return NewApp(nil, nil, context.Background(), "+70000000000", "/tmp/nonexistent-session", false)
 }
 
 func TestAuthChooseDoesNotRequestCode(t *testing.T) {

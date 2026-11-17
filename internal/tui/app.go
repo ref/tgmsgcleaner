@@ -125,8 +125,7 @@ type App struct {
 	deletingDone   bool
 	deletingErr    string
 
-	ExitAction   string // "switch", "add", "" — read by main.go after TUI exits
-	accountCount int
+	ExitAction string // "switch", "add", "delete" or "" — read by main.go after TUI exits
 
 	// Picker mode (no client)
 	pickerList    list.Model
@@ -247,7 +246,7 @@ func (m MessageItem) Title() string       { return m.date }
 func (m MessageItem) Description() string { return m.text }
 func (m MessageItem) FilterValue() string { return m.text }
 
-func NewApp(client *telegram.Client, loggedIn qrlogin.LoggedIn, ctx context.Context, phone string, sessionPath string, isAuthorized bool, accountCount int) App {
+func NewApp(client *telegram.Client, loggedIn qrlogin.LoggedIn, ctx context.Context, phone string, sessionPath string, isAuthorized bool) App {
 	ti := textinput.New()
 	ti.Placeholder = "Enter auth code..."
 	ti.SetWidth(40)
@@ -261,9 +260,6 @@ func NewApp(client *telegram.Client, loggedIn qrlogin.LoggedIn, ctx context.Cont
 	addAccountKey := key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "add account"))
 	switchAccountKey := key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "switch account"))
 	leftChannelsKey := key.NewBinding(key.WithKeys("l"), key.WithHelp("l", "find left channels"))
-	if accountCount < 2 {
-		switchAccountKey.SetEnabled(false)
-	}
 
 	l := list.New([]list.Item{}, list.NewDefaultDelegate(), 80, 24)
 	l.Title = "All Chats"
@@ -298,19 +294,18 @@ func NewApp(client *telegram.Client, loggedIn qrlogin.LoggedIn, ctx context.Cont
 	}
 
 	return App{
-		client:       client,
-		loggedIn:     loggedIn,
-		ctx:          ctx,
-		phone:        phone,
-		sessionPath:  sessionPath,
-		screen:       screen,
-		authInput:    ti,
-		passInput:    pi,
-		list:         l,
-		actionList:   al,
-		msgList:      ml,
-		progress:     p,
-		accountCount: accountCount,
+		client:      client,
+		loggedIn:    loggedIn,
+		ctx:         ctx,
+		phone:       phone,
+		sessionPath: sessionPath,
+		screen:      screen,
+		authInput:   ti,
+		passInput:   pi,
+		list:        l,
+		actionList:  al,
+		msgList:     ml,
+		progress:    p,
 	}
 }
 
@@ -961,6 +956,14 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, tea.Quit
 		}
 
+		// While a search query is being typed the list owns the keyboard;
+		// otherwise letters such as "a", "l" and "s" would fire their hotkeys.
+		if a.screen == screenGroupList && a.list.FilterState() == list.Filtering {
+			var cmd tea.Cmd
+			a.list, cmd = a.list.Update(msg)
+			return a, cmd
+		}
+
 		if a.screen == screenPicker {
 			if a.pickerConfirm != "" {
 				switch msg.String() {
@@ -1252,7 +1255,9 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, tea.Quit
 		}
 
-		if msg.String() == "s" && a.screen == screenGroupList && a.accountCount > 1 {
+		// Always available: the account list is also where accounts are added
+		// and deleted, so it matters even with a single account.
+		if msg.String() == "s" && a.screen == screenGroupList {
 			a.ExitAction = "switch"
 			return a, tea.Quit
 		}

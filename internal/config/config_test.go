@@ -6,8 +6,17 @@ import (
 	"testing"
 )
 
+// useTempHome points os.UserHomeDir at a temp dir on every platform, so tests
+// never touch the real config directory.
+func useTempHome(t *testing.T) {
+	t.Helper()
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)        // Unix and macOS
+	t.Setenv("USERPROFILE", dir) // Windows
+}
+
 func TestDeleteAccount(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	useTempHome(t)
 
 	session, err := SessionPath("79000000000")
 	if err != nil {
@@ -35,11 +44,18 @@ func TestDeleteAccount(t *testing.T) {
 	}
 }
 
-func TestDeleteAccountRejectsUnsafeNames(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+func TestUnsafeAccountNamesRejected(t *testing.T) {
+	useTempHome(t)
 	for _, name := range []string{"", ".", "..", "../config.json", "a/b"} {
 		if err := DeleteAccount(name); err == nil {
 			t.Errorf("DeleteAccount(%q) succeeded, want error", name)
 		}
+		if path, err := SessionPath(name); err == nil {
+			t.Errorf("SessionPath(%q) = %q, want error", name, path)
+		}
+	}
+	// Nothing may have been created along the way.
+	if accounts, err := ListAccounts(); err != nil || len(accounts) != 0 {
+		t.Errorf("accounts = %v, err = %v; want none", accounts, err)
 	}
 }

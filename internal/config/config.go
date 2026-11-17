@@ -79,7 +79,21 @@ func ListAccounts() ([]string, error) {
 	return phones, nil
 }
 
+// validAccountName rejects names that are not a single path element, so an
+// account can never be created or deleted outside the accounts directory.
+func validAccountName(name string) error {
+	if name == "" || name == "." || name == ".." || filepath.Base(name) != name {
+		return fmt.Errorf("invalid account name %q", name)
+	}
+	return nil
+}
+
+// SessionPath returns the session file path for the account, creating the
+// account's directory if needed.
 func SessionPath(phone string) (string, error) {
+	if err := validAccountName(phone); err != nil {
+		return "", err
+	}
 	dir, err := Dir()
 	if err != nil {
 		return "", err
@@ -95,8 +109,8 @@ func SessionPath(phone string) (string, error) {
 // It only deletes local data; the session stays in Telegram's active sessions
 // list until it is terminated there.
 func DeleteAccount(phone string) error {
-	if phone == "" || phone == "." || phone == ".." || filepath.Base(phone) != phone {
-		return fmt.Errorf("invalid account name %q", phone)
+	if err := validAccountName(phone); err != nil {
+		return err
 	}
 	dir, err := Dir()
 	if err != nil {

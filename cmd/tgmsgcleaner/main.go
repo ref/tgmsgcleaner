@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -13,6 +14,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/anik1ng/tgmsgcleaner/internal/config"
+	"github.com/anik1ng/tgmsgcleaner/internal/phonenum"
 	tg "github.com/anik1ng/tgmsgcleaner/internal/telegram"
 	"github.com/anik1ng/tgmsgcleaner/internal/tui"
 )
@@ -72,13 +74,21 @@ func main() {
 			return // user quit the account picker — clean exit
 		}
 
+		// An account added in this run is kept only if the sign-in goes through,
+		// so a mistyped number or a cancelled login leaves no empty account in
+		// the list.
+		accounts, err := config.ListAccounts()
+		if err != nil {
+			fmt.Printf("failed to list accounts: %v\n", err)
+			os.Exit(1)
+		}
+		keepAccount := slices.Contains(accounts, phone)
+
 		sessionPath, err := config.SessionPath(phone)
 		if err != nil {
 			fmt.Printf("failed to get session path: %v\n", err)
 			os.Exit(1)
 		}
-
-		accounts, _ := config.ListAccounts()
 
 		exitAction := ""
 		client, loggedIn := tg.NewClient(cfg.APIID, cfg.APIHash, sessionPath)
@@ -88,8 +98,14 @@ func main() {
 				return fmt.Errorf("check auth status: %w", err)
 			}
 
-			app := tui.NewApp(client, loggedIn, ctx, phone, sessionPath, isAuth, len(accounts))
+			app := tui.NewApp(client, loggedIn, ctx, phone, sessionPath, isAuth)
 			finalModel, err := tea.NewProgram(app).Run()
+			if !keepAccount {
+				// A failed check counts as signed in: never delete a session
+				// that may be live.
+				signedIn, authErr := tg.IsAuthorized(ctx, client)
+				keepAccount = authErr != nil || signedIn
+			}
 			if err != nil {
 				return fmt.Errorf("run TUI: %w", err)
 			}
@@ -98,6 +114,13 @@ func main() {
 			}
 			return nil
 		})
+		if !keepAccount {
+			// After Run returns, so the stopped client cannot write the
+			// session file again.
+			if err := config.DeleteAccount(phone); err != nil {
+				fmt.Printf("failed to remove the unused account: %v\n", err)
+			}
+		}
 		if runErr != nil {
 			fmt.Printf("error: %v\n", runErr)
 			os.Exit(1)
@@ -116,6 +139,39 @@ func main() {
 	}
 }
 
+// askPhone reads a phone number from stdin until it gets a valid one, and
+// returns "" when the user enters nothing. A number that already has an account
+// returns that account's name, so one number never gets two accounts.
+func askPhone(accounts []string) (string, error) {
+	hint := "leave empty to quit"
+	if len(accounts) > 0 {
+		hint = "leave empty to go back"
+	}
+	reader := bufio.NewReader(os.Stdin)
+	for {
+		fmt.Printf("Enter phone number (e.g. +79001234567, %s): ", hint)
+		line, readErr := reader.ReadString('\n')
+		input := strings.TrimSpace(line)
+		if input == "" {
+			return "", nil
+		}
+		phone, err := phonenum.Normalize(input)
+		if err != nil {
+			if readErr != nil {
+				return "", err // stdin is closed; asking again would loop forever
+			}
+			fmt.Printf("Invalid input: %v\n", err)
+			continue
+		}
+		for _, account := range accounts {
+			if phonenum.Same(account, phone) {
+				return account, nil
+			}
+		}
+		return phone, nil
+	}
+}
+
 func pickAccount(forceNew bool) (string, error) {
 	for {
 		accounts, err := config.ListAccounts()
@@ -124,14 +180,15 @@ func pickAccount(forceNew bool) (string, error) {
 		}
 
 		if forceNew || len(accounts) == 0 {
-			reader := bufio.NewReader(os.Stdin)
-			fmt.Print("Enter phone number (e.g. +79001234567): ")
-			phone, _ := reader.ReadString('\n')
-			phone = strings.TrimSpace(phone)
-			if phone == "" {
-				return "", fmt.Errorf("phone number cannot be empty")
+			phone, err := askPhone(accounts)
+			if err != nil {
+				return "", err
 			}
-			return phone, nil
+			if phone == "" && len(accounts) > 0 {
+				forceNew = false // nothing entered: back to the account list
+				continue
+			}
+			return phone, nil // empty with no accounts — caller treats it as a clean exit
 		}
 
 		app := tui.NewPickerApp(accounts)

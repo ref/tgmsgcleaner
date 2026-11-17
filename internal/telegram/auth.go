@@ -5,8 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"strings"
 
+	"github.com/anik1ng/tgmsgcleaner/internal/phonenum"
 	"github.com/gotd/td/telegram"
 	"github.com/gotd/td/telegram/auth"
 	"github.com/gotd/td/telegram/auth/qrlogin"
@@ -144,7 +144,7 @@ func VerifyAccount(ctx context.Context, client *telegram.Client, phone string) e
 	if err != nil {
 		return fmt.Errorf("get self: %w", err)
 	}
-	if samePhone(self.Phone, phone) {
+	if phonenum.Same(self.Phone, phone) {
 		return nil
 	}
 	if _, err := client.API().AuthLogOut(ctx); err != nil {
@@ -153,22 +153,6 @@ func VerifyAccount(ctx context.Context, client *telegram.Client, phone string) e
 	return fmt.Errorf("%w: this session belongs to +%s, but the account is saved as %s; "+
 		"signed out again — sign in with the right account, or add +%s as a separate account",
 		ErrAccountMismatch, self.Phone, phone, self.Phone)
-}
-
-// samePhone compares phone numbers by their digits, ignoring "+", spaces and
-// other formatting. Numbers without digits never match.
-func samePhone(a, b string) bool {
-	a, b = phoneDigits(a), phoneDigits(b)
-	return a != "" && a == b
-}
-
-func phoneDigits(s string) string {
-	return strings.Map(func(r rune) rune {
-		if r >= '0' && r <= '9' {
-			return r
-		}
-		return -1
-	}, s)
 }
 
 func SignIn(ctx context.Context, client *telegram.Client, phone, code, codeHash, sessionPath string) error {

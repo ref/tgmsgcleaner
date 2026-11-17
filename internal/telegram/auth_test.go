@@ -7,24 +7,6 @@ import (
 	"github.com/gotd/td/tg"
 )
 
-func TestSamePhone(t *testing.T) {
-	tests := []struct {
-		a, b string
-		want bool
-	}{
-		{"79001234567", "+79001234567", true},
-		{"79001234567", "+7 (900) 123-45-67", true},
-		{"79001234567", "+79001234568", false},
-		{"79001234567", "work", false},
-		{"", "", false},
-	}
-	for _, tt := range tests {
-		if got := samePhone(tt.a, tt.b); got != tt.want {
-			t.Errorf("samePhone(%q, %q) = %v, want %v", tt.a, tt.b, got, tt.want)
-		}
-	}
-}
-
 func TestDescribeDelivery(t *testing.T) {
 	tests := []struct {
 		name string
