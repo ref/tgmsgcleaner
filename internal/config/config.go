@@ -91,6 +91,23 @@ func SessionPath(phone string) (string, error) {
 	return filepath.Join(accountDir, "session.json"), nil
 }
 
+// DeleteAccount removes the account's directory, including its session file.
+// It only deletes local data; the session stays in Telegram's active sessions
+// list until it is terminated there.
+func DeleteAccount(phone string) error {
+	if phone == "" || phone == "." || phone == ".." || filepath.Base(phone) != phone {
+		return fmt.Errorf("invalid account name %q", phone)
+	}
+	dir, err := Dir()
+	if err != nil {
+		return err
+	}
+	if err := os.RemoveAll(filepath.Join(dir, "accounts", phone)); err != nil {
+		return fmt.Errorf("delete account %s: %w", phone, err)
+	}
+	return nil
+}
+
 func Reset() error {
 	dir, err := Dir()
 	if err != nil {

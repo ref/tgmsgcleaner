@@ -117,33 +117,43 @@ func main() {
 }
 
 func pickAccount(forceNew bool) (string, error) {
-	accounts, err := config.ListAccounts()
-	if err != nil {
-		return "", fmt.Errorf("list accounts: %w", err)
-	}
-
-	if forceNew || len(accounts) == 0 {
-		reader := bufio.NewReader(os.Stdin)
-		fmt.Print("Enter phone number (e.g. +79001234567): ")
-		phone, _ := reader.ReadString('\n')
-		phone = strings.TrimSpace(phone)
-		if phone == "" {
-			return "", fmt.Errorf("phone number cannot be empty")
+	for {
+		accounts, err := config.ListAccounts()
+		if err != nil {
+			return "", fmt.Errorf("list accounts: %w", err)
 		}
-		return phone, nil
-	}
 
-	if len(accounts) == 1 {
-		return accounts[0], nil
-	}
+		if forceNew || len(accounts) == 0 {
+			reader := bufio.NewReader(os.Stdin)
+			fmt.Print("Enter phone number (e.g. +79001234567): ")
+			phone, _ := reader.ReadString('\n')
+			phone = strings.TrimSpace(phone)
+			if phone == "" {
+				return "", fmt.Errorf("phone number cannot be empty")
+			}
+			return phone, nil
+		}
 
-	app := tui.NewPickerApp(accounts)
-	finalModel, err := tea.NewProgram(app).Run()
-	if err != nil {
-		return "", fmt.Errorf("account picker: %w", err)
+		app := tui.NewPickerApp(accounts)
+		finalModel, err := tea.NewProgram(app).Run()
+		if err != nil {
+			return "", fmt.Errorf("account picker: %w", err)
+		}
+		final, ok := finalModel.(tui.App)
+		if !ok {
+			return "", nil
+		}
+
+		switch final.ExitAction {
+		case "add":
+			forceNew = true
+		case "delete":
+			if err := config.DeleteAccount(final.Selected); err != nil {
+				return "", err
+			}
+			// Loop to reopen the picker with the updated list.
+		default:
+			return final.Selected, nil // empty when the user quit the picker — caller treats it as a clean exit
+		}
 	}
-	if final, ok := finalModel.(tui.App); ok && final.Selected != "" {
-		return final.Selected, nil
-	}
-	return "", nil // user quit the picker without selecting — caller treats empty as clean exit
 }

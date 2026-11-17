@@ -5,6 +5,8 @@ import (
 	"errors"
 	"testing"
 
+	tea "charm.land/bubbletea/v2"
+
 	tg "github.com/anik1ng/tgmsgcleaner/internal/telegram"
 )
 
@@ -198,5 +200,43 @@ func TestApplyFilterLeftWithMessages(t *testing.T) {
 	a.applyFilter()
 	if got := len(a.list.Items()); got != 3 {
 		t.Errorf("Left filter kept %d items, want 3", got)
+	}
+}
+
+func press(t *testing.T, a App, k tea.KeyPressMsg) App {
+	t.Helper()
+	return update(t, a, k)
+}
+
+func TestPickerDeleteAccount(t *testing.T) {
+	keyD := tea.KeyPressMsg{Code: 'd', Text: "d"}
+	keyY := tea.KeyPressMsg{Code: 'y', Text: "y"}
+	keyEsc := tea.KeyPressMsg{Code: tea.KeyEscape}
+
+	a := NewPickerApp([]string{"111", "222"})
+
+	// 'd' asks for confirmation; esc cancels without exiting.
+	a = press(t, a, keyD)
+	if a.pickerConfirm != "111" {
+		t.Fatalf("pickerConfirm = %q, want %q", a.pickerConfirm, "111")
+	}
+	a = press(t, a, keyEsc)
+	if a.pickerConfirm != "" || a.ExitAction != "" {
+		t.Fatalf("esc: pickerConfirm = %q, ExitAction = %q, want both empty", a.pickerConfirm, a.ExitAction)
+	}
+
+	// 'd' then 'y' hands the account to main.go for deletion.
+	a = press(t, a, keyD)
+	a = press(t, a, keyY)
+	if a.ExitAction != "delete" || a.Selected != "111" {
+		t.Errorf("confirm: ExitAction = %q, Selected = %q, want delete/111", a.ExitAction, a.Selected)
+	}
+}
+
+func TestPickerAddAccount(t *testing.T) {
+	a := NewPickerApp([]string{"111"})
+	a = press(t, a, tea.KeyPressMsg{Code: 'a', Text: "a"})
+	if a.ExitAction != "add" {
+		t.Errorf("ExitAction = %q, want add", a.ExitAction)
 	}
 }

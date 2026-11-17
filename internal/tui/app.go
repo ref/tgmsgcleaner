@@ -107,8 +107,9 @@ type App struct {
 	accountCount int
 
 	// Picker mode (no client)
-	pickerList list.Model
-	Selected   string // selected phone from picker — read by main.go
+	pickerList    list.Model
+	pickerConfirm string // phone awaiting delete confirmation
+	Selected      string // selected phone from picker — read by main.go
 }
 
 type accountItem struct {
@@ -288,6 +289,16 @@ func NewPickerApp(accounts []string) App {
 	l.Title = "Select account"
 	l.SetFilteringEnabled(false)
 	l.KeyMap.Quit.SetKeys("q")
+	// 'd' deletes an account here, so drop it from page navigation.
+	l.KeyMap.NextPage.SetKeys("right", "l", "pgdown", "f")
+	addKey := key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "add account"))
+	deleteKey := key.NewBinding(key.WithKeys("d"), key.WithHelp("d", "delete account"))
+	l.AdditionalShortHelpKeys = func() []key.Binding {
+		return []key.Binding{addKey, deleteKey}
+	}
+	l.AdditionalFullHelpKeys = func() []key.Binding {
+		return []key.Binding{addKey, deleteKey}
+	}
 
 	return App{
 		screen:     screenPicker,
@@ -764,13 +775,33 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		if a.screen == screenPicker {
-			if msg.String() == "enter" {
+			if a.pickerConfirm != "" {
+				switch msg.String() {
+				case "y":
+					// main.go deletes the account and reopens the picker.
+					a.Selected = a.pickerConfirm
+					a.ExitAction = "delete"
+					return a, tea.Quit
+				case "esc", "n":
+					a.pickerConfirm = ""
+				}
+				return a, nil
+			}
+			switch msg.String() {
+			case "enter":
 				if item, ok := a.pickerList.SelectedItem().(accountItem); ok {
 					a.Selected = item.phone
 				}
 				return a, tea.Quit
-			}
-			if msg.String() == "q" {
+			case "a":
+				a.ExitAction = "add"
+				return a, tea.Quit
+			case "d":
+				if item, ok := a.pickerList.SelectedItem().(accountItem); ok {
+					a.pickerConfirm = item.phone
+				}
+				return a, nil
+			case "q":
 				return a, tea.Quit
 			}
 		}
@@ -1017,7 +1048,14 @@ func (a App) View() tea.View {
 	switch a.screen {
 	case screenPicker:
 		s := appTitle() + "\n\n"
-		s += a.pickerList.View()
+		if a.pickerConfirm != "" {
+			s += fmt.Sprintf("  Delete account %s from this app?\n\n"+
+				"  Its saved session will be removed. Telegram keeps listing this\n"+
+				"  device in active sessions until you terminate it there.\n\n"+
+				"  Press [y] to confirm, [esc] to cancel\n", a.pickerConfirm)
+		} else {
+			s += a.pickerList.View()
+		}
 		v.SetContent(s)
 	case screenAuth:
 		s := appTitle() + "\n\nEnter your Telegram auth code:\n\n" + a.authInput.View() + "\n"
