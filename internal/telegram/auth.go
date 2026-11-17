@@ -6,11 +6,11 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/anik1ng/tgmsgcleaner/internal/phonenum"
 	"github.com/gotd/td/telegram/auth"
 	"github.com/gotd/td/telegram/auth/qrlogin"
 	"github.com/gotd/td/tg"
 	"github.com/gotd/td/tgerr"
+	"github.com/ref/tgmsgcleaner/internal/phonenum"
 )
 
 // ErrAuthRestart signals that Telegram reset the authorization flow

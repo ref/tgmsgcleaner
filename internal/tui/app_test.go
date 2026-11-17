@@ -10,7 +10,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
-	tg "github.com/anik1ng/tgmsgcleaner/internal/telegram"
+	tg "github.com/ref/tgmsgcleaner/internal/telegram"
 )
 
 func newTestApp(t *testing.T) App {

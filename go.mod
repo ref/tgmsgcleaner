@@ -1,4 +1,4 @@
-module github.com/anik1ng/tgmsgcleaner
+module github.com/ref/tgmsgcleaner
 
 go 1.25.1
 

@@ -14,8 +14,8 @@ import (
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
-	tg "github.com/anik1ng/tgmsgcleaner/internal/telegram"
 	"github.com/gotd/td/telegram/auth"
+	tg "github.com/ref/tgmsgcleaner/internal/telegram"
 	"github.com/skip2/go-qrcode"
 )
 
@@ -40,7 +40,7 @@ const (
 
 // Version is the application version shown in the UI. Local builds show
 // "dev"; release builds override it from the git tag via
-// -ldflags "-X github.com/anik1ng/tgmsgcleaner/internal/tui.Version=vX.Y.Z"
+// -ldflags "-X github.com/ref/tgmsgcleaner/internal/tui.Version=vX.Y.Z"
 // (see .goreleaser.yaml).
 var Version = "dev"
 

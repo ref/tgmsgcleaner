@@ -5,7 +5,7 @@ builds:
     binary: tgmsgcleaner
     ldflags:
       - -s -w
-      - -X github.com/anik1ng/tgmsgcleaner/internal/tui.Version=v{{ .Version }}
+      - -X github.com/ref/tgmsgcleaner/internal/tui.Version=v{{ .Version }}
     goos:
       - linux
       - darwin
@@ -22,8 +22,8 @@ archives:
 
 brews:
   - repository:
-      owner: anik1ng
+      owner: ref
       name: homebrew-tap
       token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
-    homepage: "https://github.com/anik1ng/tgmsgcleaner"
+    homepage: "https://github.com/ref/tgmsgcleaner"
     description: "Clean up your Telegram presence"

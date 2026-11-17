@@ -17,17 +17,17 @@ Clean up your Telegram presence — delete old messages, reactions, and leave gr
 ### macOS
 
 ```
-brew install anik1ng/tap/tgmsgcleaner
+brew install ref/tap/tgmsgcleaner
 ```
 
 ### Linux / Windows
 
-Download the binary from [Releases](https://github.com/anik1ng/tgmsgcleaner/releases), extract, and run in your terminal.
+Download the binary from [Releases](https://github.com/ref/tgmsgcleaner/releases), extract, and run in your terminal.
 
 ### From source
 
 ```
-go install github.com/anik1ng/tgmsgcleaner/cmd/tgmsgcleaner@latest
+go install github.com/ref/tgmsgcleaner/cmd/tgmsgcleaner@latest
 ```
 
 ## Setup
