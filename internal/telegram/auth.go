@@ -7,7 +7,6 @@ import (
 	"os"
 
 	"github.com/anik1ng/tgmsgcleaner/internal/phonenum"
-	"github.com/gotd/td/telegram"
 	"github.com/gotd/td/telegram/auth"
 	"github.com/gotd/td/telegram/auth/qrlogin"
 	"github.com/gotd/td/tg"
@@ -34,7 +33,7 @@ type SentCode struct {
 	Delivery string // human-readable description of where the code was sent
 }
 
-func SendCode(ctx context.Context, client *telegram.Client, phone string, sessionPath string) (SentCode, error) {
+func SendCode(ctx context.Context, client *Client, phone string, sessionPath string) (SentCode, error) {
 	res, err := client.Auth().SendCode(ctx, phone, auth.SendCodeOptions{})
 	if err != nil {
 		if isAuthRestart(err) {
@@ -92,17 +91,17 @@ type QRProgress struct {
 
 // QRLogin shows login tokens on ch until the user accepts one on a device
 // where the account is already signed in. It closes ch when it returns.
-func QRLogin(ctx context.Context, client *telegram.Client, loggedIn qrlogin.LoggedIn, ch chan<- QRProgress) {
+func QRLogin(ctx context.Context, client *Client, ch chan<- QRProgress) {
 	defer close(ch)
 	// Drop a signal left over from an earlier attempt: it would make Auth
 	// import a token nobody accepted. A token that really was accepted is
 	// picked up by the import below.
 	select {
-	case <-loggedIn:
+	case <-client.loggedIn:
 	default:
 	}
 	qr := client.QR()
-	_, err := qr.Auth(ctx, loggedIn, func(ctx context.Context, token qrlogin.Token) error {
+	_, err := qr.Auth(ctx, client.loggedIn, func(ctx context.Context, token qrlogin.Token) error {
 		select {
 		case ch <- QRProgress{URL: token.URL()}:
 			return nil
@@ -139,7 +138,7 @@ var ErrAccountMismatch = errors.New("signed in to a different account")
 // the session is signed out again, so it cannot be used by mistake, and
 // ErrAccountMismatch is returned. Any other error means the check itself
 // failed and the session is still signed in.
-func VerifyAccount(ctx context.Context, client *telegram.Client, phone string) error {
+func VerifyAccount(ctx context.Context, client *Client, phone string) error {
 	self, err := client.Self(ctx)
 	if err != nil {
 		return fmt.Errorf("get self: %w", err)
@@ -155,7 +154,7 @@ func VerifyAccount(ctx context.Context, client *telegram.Client, phone string) e
 		ErrAccountMismatch, self.Phone, phone, self.Phone)
 }
 
-func SignIn(ctx context.Context, client *telegram.Client, phone, code, codeHash, sessionPath string) error {
+func SignIn(ctx context.Context, client *Client, phone, code, codeHash, sessionPath string) error {
 	_, err := client.Auth().SignIn(ctx, phone, code, codeHash)
 	if err != nil {
 		if isAuthRestart(err) {
@@ -168,7 +167,7 @@ func SignIn(ctx context.Context, client *telegram.Client, phone, code, codeHash,
 	return nil
 }
 
-func CheckPassword(ctx context.Context, client *telegram.Client, password, sessionPath string) error {
+func CheckPassword(ctx context.Context, client *Client, password, sessionPath string) error {
 	_, err := client.Auth().Password(ctx, password)
 	if err != nil {
 		if isAuthRestart(err) {

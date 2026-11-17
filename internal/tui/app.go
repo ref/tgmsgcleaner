@@ -15,10 +15,18 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	tg "github.com/anik1ng/tgmsgcleaner/internal/telegram"
-	"github.com/gotd/td/telegram"
 	"github.com/gotd/td/telegram/auth"
-	"github.com/gotd/td/telegram/auth/qrlogin"
 	"github.com/skip2/go-qrcode"
+)
+
+// ExitAction tells main.go what to do after the TUI exits.
+type ExitAction string
+
+const (
+	ExitQuit   ExitAction = ""       // leave the app
+	ExitAdd    ExitAction = "add"    // ask for a phone number and add an account
+	ExitSwitch ExitAction = "switch" // return to the account list
+	ExitDelete ExitAction = "delete" // delete the account named in Selected
 )
 
 // Sign-in method on the auth screen. Nothing is requested from Telegram until
@@ -69,7 +77,7 @@ var (
 )
 
 type App struct {
-	client      *telegram.Client
+	client      *tg.Client
 	ctx         context.Context
 	phone       string
 	sessionPath string
@@ -81,7 +89,6 @@ type App struct {
 	authErr     string
 	authMode    int
 
-	loggedIn qrlogin.LoggedIn
 	qrText   string             // rendered QR code for the current login token
 	qrCancel context.CancelFunc // stops the running QR login
 	qrGen    int                // drops messages from a cancelled QR login
@@ -125,7 +132,7 @@ type App struct {
 	deletingDone   bool
 	deletingErr    string
 
-	ExitAction string // "switch", "add", "delete" or "" — read by main.go after TUI exits
+	ExitAction ExitAction // read by main.go after the TUI exits
 
 	// Picker mode (no client)
 	pickerList    list.Model
@@ -246,7 +253,7 @@ func (m MessageItem) Title() string       { return m.date }
 func (m MessageItem) Description() string { return m.text }
 func (m MessageItem) FilterValue() string { return m.text }
 
-func NewApp(client *telegram.Client, loggedIn qrlogin.LoggedIn, ctx context.Context, phone string, sessionPath string, isAuthorized bool) App {
+func NewApp(client *tg.Client, ctx context.Context, phone string, sessionPath string, isAuthorized bool) App {
 	ti := textinput.New()
 	ti.Placeholder = "Enter auth code..."
 	ti.SetWidth(40)
@@ -295,7 +302,6 @@ func NewApp(client *telegram.Client, loggedIn qrlogin.LoggedIn, ctx context.Cont
 
 	return App{
 		client:      client,
-		loggedIn:    loggedIn,
 		ctx:         ctx,
 		phone:       phone,
 		sessionPath: sessionPath,
@@ -421,7 +427,7 @@ func (a *App) startQR() tea.Cmd {
 	a.qrText = ""
 	a.authErr = ""
 	ch := make(chan tg.QRProgress, 1)
-	go tg.QRLogin(ctx, a.client, a.loggedIn, ch)
+	go tg.QRLogin(ctx, a.client, ch)
 	return waitForQR(ch, a.qrGen)
 }
 
@@ -970,7 +976,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				case "y":
 					// main.go deletes the account and reopens the picker.
 					a.Selected = a.pickerConfirm
-					a.ExitAction = "delete"
+					a.ExitAction = ExitDelete
 					return a, tea.Quit
 				case "esc", "n":
 					a.pickerConfirm = ""
@@ -984,7 +990,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return a, tea.Quit
 			case "a":
-				a.ExitAction = "add"
+				a.ExitAction = ExitAdd
 				return a, tea.Quit
 			case "d":
 				if item, ok := a.pickerList.SelectedItem().(accountItem); ok {
@@ -1251,14 +1257,14 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		if msg.String() == "a" && a.screen == screenGroupList {
-			a.ExitAction = "add"
+			a.ExitAction = ExitAdd
 			return a, tea.Quit
 		}
 
 		// Always available: the account list is also where accounts are added
 		// and deleted, so it matters even with a single account.
 		if msg.String() == "s" && a.screen == screenGroupList {
-			a.ExitAction = "switch"
+			a.ExitAction = ExitSwitch
 			return a, tea.Quit
 		}
 

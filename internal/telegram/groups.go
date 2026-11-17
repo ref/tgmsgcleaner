@@ -7,7 +7,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gotd/td/telegram"
 	"github.com/gotd/td/tg"
 	"github.com/gotd/td/tgerr"
 )
@@ -31,7 +30,7 @@ type ChatInfo struct {
 	IsLeft      bool
 }
 
-func GetChats(ctx context.Context, client *telegram.Client) ([]ChatInfo, error) {
+func GetChats(ctx context.Context, client *Client) ([]ChatInfo, error) {
 	api := client.API()
 
 	var allChats []ChatInfo
@@ -172,12 +171,12 @@ func GetChats(ctx context.Context, client *telegram.Client) ([]ChatInfo, error) 
 	return allChats, nil
 }
 
-func CountMyMessages(ctx context.Context, client *telegram.Client, peer tg.InputPeerClass, selfID int64) (int, error) {
+func CountMyMessages(ctx context.Context, client *Client, peer tg.InputPeerClass, selfID int64) (int, error) {
 	// Delegate to the retry-safe helper (handles FLOOD_WAIT via invokeWithRetry).
 	return countMessages(ctx, client.API(), peer, selfID, 0)
 }
 
-func GetSelfID(ctx context.Context, client *telegram.Client) (int64, error) {
+func GetSelfID(ctx context.Context, client *Client) (int64, error) {
 	me, err := client.Self(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("get self: %w", err)
@@ -191,7 +190,7 @@ type MessageInfo struct {
 	Text string
 }
 
-func FetchMyMessages(ctx context.Context, client *telegram.Client, chat ChatInfo, selfID int64, offsetID int, limit int) (messages []MessageInfo, nextOffsetID int, hasMore bool, err error) {
+func FetchMyMessages(ctx context.Context, client *Client, chat ChatInfo, selfID int64, offsetID int, limit int) (messages []MessageInfo, nextOffsetID int, hasMore bool, err error) {
 	api := client.API()
 	nextOffsetID = offsetID
 
@@ -322,7 +321,7 @@ func withTakeout(ctx context.Context, api *tg.Client, needed bool, fn func(takeo
 	return runErr
 }
 
-func DeleteMyMessages(ctx context.Context, client *telegram.Client, chat ChatInfo, selfID int64, progress chan<- DeleteProgress) {
+func DeleteMyMessages(ctx context.Context, client *Client, chat ChatInfo, selfID int64, progress chan<- DeleteProgress) {
 	defer close(progress)
 	api := client.API()
 
@@ -548,7 +547,7 @@ type ReactionProgress struct {
 	Err     error
 }
 
-func RemoveMyReactions(ctx context.Context, client *telegram.Client, chat ChatInfo, progress chan<- ReactionProgress) {
+func RemoveMyReactions(ctx context.Context, client *Client, chat ChatInfo, progress chan<- ReactionProgress) {
 	defer close(progress)
 	api := client.API()
 
@@ -625,7 +624,7 @@ func RemoveMyReactions(ctx context.Context, client *telegram.Client, chat ChatIn
 	sendProgress(ctx, progress, ReactionProgress{Checked: checked, Removed: removed, Done: true})
 }
 
-func LeaveChat(ctx context.Context, client *telegram.Client, chat ChatInfo, selfID int64) error {
+func LeaveChat(ctx context.Context, client *Client, chat ChatInfo, selfID int64) error {
 	api := client.API()
 
 	switch peer := chat.InputPeer.(type) {
@@ -656,7 +655,7 @@ type MessageCountProgress struct {
 	Err       error
 }
 
-func CountAllMyMessages(ctx context.Context, client *telegram.Client, chats []ChatInfo, selfID int64, progress chan<- MessageCountProgress) {
+func CountAllMyMessages(ctx context.Context, client *Client, chats []ChatInfo, selfID int64, progress chan<- MessageCountProgress) {
 	defer close(progress)
 	for i, chat := range chats {
 		count, err := CountMyMessages(ctx, client, chat.InputPeer, selfID)
@@ -685,7 +684,7 @@ type ExportProgress struct {
 	FilePath string
 }
 
-func ExportMyMessages(ctx context.Context, client *telegram.Client, chat ChatInfo, selfID int64, phone string, progress chan<- ExportProgress) {
+func ExportMyMessages(ctx context.Context, client *Client, chat ChatInfo, selfID int64, phone string, progress chan<- ExportProgress) {
 	defer close(progress)
 	api := client.API()
 
@@ -788,7 +787,7 @@ func snapshotChats(chats []ChatInfo) []ChatInfo {
 	return append([]ChatInfo(nil), chats...)
 }
 
-func GetLeftChannels(ctx context.Context, client *telegram.Client, selfID int64, progress chan<- LeftChannelsProgress) {
+func GetLeftChannels(ctx context.Context, client *Client, selfID int64, progress chan<- LeftChannelsProgress) {
 	defer close(progress)
 	api := client.API()
 

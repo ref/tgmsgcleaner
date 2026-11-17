@@ -15,7 +15,7 @@ import (
 
 func newTestApp(t *testing.T) App {
 	t.Helper()
-	return NewApp(nil, nil, context.Background(), "+70000000000", "/tmp/nonexistent-session", true)
+	return NewApp(nil, context.Background(), "+70000000000", "/tmp/nonexistent-session", true)
 }
 
 func update(t *testing.T, a App, msg any) App {
@@ -224,14 +224,14 @@ func TestPickerDeleteAccount(t *testing.T) {
 		t.Fatalf("pickerConfirm = %q, want %q", a.pickerConfirm, "111")
 	}
 	a = press(t, a, keyEsc)
-	if a.pickerConfirm != "" || a.ExitAction != "" {
+	if a.pickerConfirm != "" || a.ExitAction != ExitQuit {
 		t.Fatalf("esc: pickerConfirm = %q, ExitAction = %q, want both empty", a.pickerConfirm, a.ExitAction)
 	}
 
 	// 'd' then 'y' hands the account to main.go for deletion.
 	a = press(t, a, keyD)
 	a = press(t, a, keyY)
-	if a.ExitAction != "delete" || a.Selected != "111" {
+	if a.ExitAction != ExitDelete || a.Selected != "111" {
 		t.Errorf("confirm: ExitAction = %q, Selected = %q, want delete/111", a.ExitAction, a.Selected)
 	}
 }
@@ -239,7 +239,7 @@ func TestPickerDeleteAccount(t *testing.T) {
 func TestPickerAddAccount(t *testing.T) {
 	a := NewPickerApp([]string{"111"})
 	a = press(t, a, tea.KeyPressMsg{Code: 'a', Text: "a"})
-	if a.ExitAction != "add" {
+	if a.ExitAction != ExitAdd {
 		t.Errorf("ExitAction = %q, want add", a.ExitAction)
 	}
 }
@@ -247,7 +247,7 @@ func TestPickerAddAccount(t *testing.T) {
 func TestSwitchAccountWorksWithOneAccount(t *testing.T) {
 	a := newTestApp(t)
 	a = press(t, a, tea.KeyPressMsg{Code: 's', Text: "s"})
-	if a.ExitAction != "switch" {
+	if a.ExitAction != ExitSwitch {
 		t.Errorf("ExitAction = %q, want switch", a.ExitAction)
 	}
 }
@@ -265,7 +265,7 @@ func TestSearchInputDoesNotTriggerHotkeys(t *testing.T) {
 	for _, r := range "asl" {
 		a = press(t, a, tea.KeyPressMsg{Code: r, Text: string(r)})
 	}
-	if a.ExitAction != "" || a.loadingLeft {
+	if a.ExitAction != ExitQuit || a.loadingLeft {
 		t.Errorf("typing a query fired a hotkey: ExitAction = %q, loadingLeft = %v", a.ExitAction, a.loadingLeft)
 	}
 	if got := a.list.FilterValue(); got != "asl" {
@@ -275,7 +275,7 @@ func TestSearchInputDoesNotTriggerHotkeys(t *testing.T) {
 
 func newAuthApp(t *testing.T) App {
 	t.Helper()
-	return NewApp(nil, nil, context.Background(), "+70000000000", "/tmp/nonexistent-session", false)
+	return NewApp(nil, context.Background(), "+70000000000", "/tmp/nonexistent-session", false)
 }
 
 func TestAuthChooseDoesNotRequestCode(t *testing.T) {

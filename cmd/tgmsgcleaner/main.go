@@ -90,15 +90,15 @@ func main() {
 			os.Exit(1)
 		}
 
-		exitAction := ""
-		client, loggedIn := tg.NewClient(cfg.APIID, cfg.APIHash, sessionPath)
+		exitAction := tui.ExitQuit
+		client := tg.NewClient(cfg.APIID, cfg.APIHash, sessionPath)
 		runErr := client.Run(context.Background(), func(ctx context.Context) error {
 			isAuth, err := tg.IsAuthorized(ctx, client)
 			if err != nil {
 				return fmt.Errorf("check auth status: %w", err)
 			}
 
-			app := tui.NewApp(client, loggedIn, ctx, phone, sessionPath, isAuth)
+			app := tui.NewApp(client, ctx, phone, sessionPath, isAuth)
 			finalModel, err := tea.NewProgram(app).Run()
 			if !keepAccount {
 				// A failed check counts as signed in: never delete a session
@@ -127,10 +127,10 @@ func main() {
 		}
 
 		switch exitAction {
-		case "add":
+		case tui.ExitAdd:
 			addAccount = true
 			continue
-		case "switch":
+		case tui.ExitSwitch:
 			addAccount = false
 			continue
 		default:
@@ -202,9 +202,9 @@ func pickAccount(forceNew bool) (string, error) {
 		}
 
 		switch final.ExitAction {
-		case "add":
+		case tui.ExitAdd:
 			forceNew = true
-		case "delete":
+		case tui.ExitDelete:
 			if err := config.DeleteAccount(final.Selected); err != nil {
 				return "", err
 			}
