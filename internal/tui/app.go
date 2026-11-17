@@ -64,6 +64,7 @@ type App struct {
 	sessionPath string
 	selfID      int64
 	codeHash    string
+	codeVia     string // where Telegram sent the login code
 	authErr     string
 
 	screen    int
@@ -127,7 +128,7 @@ type Group struct {
 	myMessages int
 }
 
-type codeSentMsg struct{ codeHash string }
+type codeSentMsg struct{ codeHash, codeVia string }
 type authDoneMsg struct{}
 type authErrMsg struct{ err error }
 type needPasswordMsg struct{}
@@ -306,11 +307,11 @@ func (a App) Init() tea.Cmd {
 
 func (a *App) sendCodeCmd() tea.Cmd {
 	return func() tea.Msg {
-		codeHash, err := tg.SendCode(a.ctx, a.client, a.phone, a.sessionPath)
+		sent, err := tg.SendCode(a.ctx, a.client, a.phone, a.sessionPath)
 		if err != nil {
 			return authErrMsg{err: err}
 		}
-		return codeSentMsg{codeHash: codeHash}
+		return codeSentMsg{codeHash: sent.Hash, codeVia: sent.Delivery}
 	}
 }
 
@@ -567,6 +568,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case codeSentMsg:
 		a.codeHash = msg.codeHash
+		a.codeVia = msg.codeVia
 		a.authErr = ""
 		return a, nil
 
@@ -575,6 +577,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// to the code screen and request a fresh code.
 		a.screen = screenAuth
 		a.codeHash = ""
+		a.codeVia = ""
 		a.authInput.SetValue("")
 		a.authInput.Focus()
 		a.passInput.SetValue("")
@@ -1023,6 +1026,8 @@ func (a App) View() tea.View {
 		}
 		if a.codeHash == "" {
 			s += "\nSending code..."
+		} else if a.codeVia != "" {
+			s += "\n" + a.codeVia + "\n"
 		}
 		v.SetContent(s)
 	case screenPassword:
