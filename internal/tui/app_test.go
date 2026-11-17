@@ -3,9 +3,11 @@ package tui
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	tg "github.com/anik1ng/tgmsgcleaner/internal/telegram"
 )
@@ -285,11 +287,16 @@ func TestQRMessages(t *testing.T) {
 		t.Errorf("stale message changed state: cmd nil = %v, authErr = %q", cmd == nil, a.authErr)
 	}
 
-	// A cancelled login must not be treated as a successful sign-in.
+	// A cancelled login must not be treated as a successful sign-in, and must
+	// not leave the dead code on screen.
 	model, cmd = a.Update(qrMsg{done: true, err: context.Canceled, gen: 3})
 	a = model.(App)
 	if cmd != nil {
 		t.Error("cancelled QR login returned a command, want none")
+	}
+	if a.authMode != authModeChoose || a.qrText != "" || a.authErr == "" {
+		t.Errorf("after cancel: mode = %d, qrText empty = %v, authErr = %q; want choice mode, no code and an error",
+			a.authMode, a.qrText == "", a.authErr)
 	}
 
 	// A failed login returns to the choice screen with the error shown.
@@ -297,5 +304,99 @@ func TestQRMessages(t *testing.T) {
 	a = update(t, a, qrMsg{done: true, err: errors.New("boom"), gen: a.qrGen})
 	if a.authMode != authModeChoose || a.authErr != "boom" {
 		t.Errorf("mode = %d, authErr = %q; want choice mode and error", a.authMode, a.authErr)
+	}
+}
+
+func TestQRSuccessLoadsAccount(t *testing.T) {
+	a := newAuthApp(t)
+	a.authMode = authModeQR
+	a.qrSignIn = true
+	a.qrText = "code"
+
+	// An accepted code replaces the QR screen with the loading screen.
+	model, cmd := a.Update(qrMsg{done: true, gen: a.qrGen})
+	a = model.(App)
+	if a.authMode != authModeLoading || a.qrText != "" || cmd == nil {
+		t.Fatalf("mode = %d, qrText = %q, cmd nil = %v; want loading mode, no code and a load command",
+			a.authMode, a.qrText, cmd == nil)
+	}
+
+	// A code scanned by another account sends the user back to the choice.
+	a = update(t, a, authFailedMsg{err: errors.New("wrong account")})
+	if a.authMode != authModeChoose || a.authErr != "wrong account" || a.qrSignIn {
+		t.Errorf("mode = %d, authErr = %q, qrSignIn = %v; want choice mode, the error and no QR sign-in",
+			a.authMode, a.authErr, a.qrSignIn)
+	}
+}
+
+func TestCodeRequestFailureReturnsToChoice(t *testing.T) {
+	a := newAuthApp(t)
+	a = press(t, a, tea.KeyPressMsg{Code: 'c', Text: "c"})
+	a = update(t, a, codeSentMsg{err: errors.New("flood"), gen: a.codeGen})
+	if a.authMode != authModeChoose || a.authErr != "flood" || a.codeSending {
+		t.Errorf("mode = %d, authErr = %q, codeSending = %v; want choice mode, the error and no pending request",
+			a.authMode, a.authErr, a.codeSending)
+	}
+}
+
+func TestBackKeepsPendingCode(t *testing.T) {
+	keyC := tea.KeyPressMsg{Code: 'c', Text: "c"}
+
+	a := newAuthApp(t)
+	a = press(t, a, keyC)
+	a = update(t, a, codeSentMsg{codeHash: "h1", codeVia: "sms", gen: a.codeGen})
+	a = press(t, a, tea.KeyPressMsg{Code: tea.KeyEscape})
+
+	// Returning to the code screen reuses the code instead of burning another.
+	model, cmd := a.Update(keyC)
+	a = model.(App)
+	if cmd != nil || a.codeHash != "h1" || a.authMode != authModeCode {
+		t.Fatalf("cmd nil = %v, codeHash = %q, mode = %d; want no request, the kept code and code mode",
+			cmd == nil, a.codeHash, a.authMode)
+	}
+
+	// The result of an abandoned request is dropped.
+	a = update(t, a, codeSentMsg{codeHash: "old", gen: a.codeGen - 1})
+	if a.codeHash != "h1" {
+		t.Errorf("stale result replaced the code: codeHash = %q", a.codeHash)
+	}
+
+	// ctrl+r asks for a new code on purpose.
+	model, cmd = a.Update(tea.KeyPressMsg{Code: 'r', Mod: tea.ModCtrl})
+	a = model.(App)
+	if cmd == nil || a.codeHash != "" || !a.codeSending {
+		t.Errorf("cmd nil = %v, codeHash = %q, codeSending = %v; want a new request in flight",
+			cmd == nil, a.codeHash, a.codeSending)
+	}
+}
+
+func TestQRViewFitsTerminal(t *testing.T) {
+	qr, err := renderQR("tg://login?token=abc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := lipgloss.Height(qr)
+
+	a := newAuthApp(t)
+	a.authMode = authModeQR
+	a.qrText = qr
+
+	// Size unknown yet: the full layout with the title.
+	if view := a.qrView(); !strings.Contains(view, appTitle()) || !strings.Contains(view, qr) {
+		t.Error("full layout is missing the title or the code")
+	}
+
+	// Short terminal: the title goes, the whole code stays.
+	a = update(t, a, tea.WindowSizeMsg{Width: 80, Height: rows + 1})
+	view := a.qrView()
+	if strings.Contains(view, appTitle()) || !strings.Contains(view, qr) || lipgloss.Height(view) > rows+1 {
+		t.Errorf("compact layout: has title = %v, has code = %v, height = %d (limit %d)",
+			strings.Contains(view, appTitle()), strings.Contains(view, qr), lipgloss.Height(view), rows+1)
+	}
+
+	// Too short even for the bare code: say so instead of clipping it.
+	a = update(t, a, tea.WindowSizeMsg{Width: 80, Height: rows - 1})
+	if view := a.qrView(); strings.Contains(view, qr) || !strings.Contains(view, "too small") {
+		t.Error("a terminal too small for the code should get a message, not a clipped code")
 	}
 }

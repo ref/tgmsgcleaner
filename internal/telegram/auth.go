@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/gotd/td/telegram"
 	"github.com/gotd/td/telegram/auth"
@@ -93,7 +94,15 @@ type QRProgress struct {
 // where the account is already signed in. It closes ch when it returns.
 func QRLogin(ctx context.Context, client *telegram.Client, loggedIn qrlogin.LoggedIn, ch chan<- QRProgress) {
 	defer close(ch)
-	_, err := client.QR().Auth(ctx, loggedIn, func(ctx context.Context, token qrlogin.Token) error {
+	// Drop a signal left over from an earlier attempt: it would make Auth
+	// import a token nobody accepted. A token that really was accepted is
+	// picked up by the import below.
+	select {
+	case <-loggedIn:
+	default:
+	}
+	qr := client.QR()
+	_, err := qr.Auth(ctx, loggedIn, func(ctx context.Context, token qrlogin.Token) error {
 		select {
 		case ch <- QRProgress{URL: token.URL()}:
 			return nil
@@ -101,6 +110,14 @@ func QRLogin(ctx context.Context, client *telegram.Client, loggedIn qrlogin.Logg
 			return ctx.Err()
 		}
 	})
+	if err != nil && ctx.Err() == nil && !tgerr.Is(err, "SESSION_PASSWORD_NEEDED") {
+		// A token accepted while Auth was requesting a new one makes Auth fail
+		// on the unexpected "already accepted" reply. Importing completes such
+		// a login; when nothing was accepted it fails and the first error stays.
+		if _, importErr := qr.Import(ctx); importErr == nil || tgerr.Is(importErr, "SESSION_PASSWORD_NEEDED") {
+			err = importErr
+		}
+	}
 	if tgerr.Is(err, "SESSION_PASSWORD_NEEDED") {
 		err = auth.ErrPasswordAuthNeeded
 	} else if err != nil {
@@ -110,6 +127,48 @@ func QRLogin(ctx context.Context, client *telegram.Client, loggedIn qrlogin.Logg
 	case ch <- QRProgress{Done: true, Err: err}:
 	case <-ctx.Done():
 	}
+}
+
+// ErrAccountMismatch reports that the session was signed in to a different
+// account than the one it is saved under, and has been signed out again.
+var ErrAccountMismatch = errors.New("signed in to a different account")
+
+// VerifyAccount checks that the session is signed in to the account saved
+// under phone. A QR code can be scanned by any account, so without this check
+// a session could end up stored under another account's number. On a mismatch
+// the session is signed out again, so it cannot be used by mistake, and
+// ErrAccountMismatch is returned. Any other error means the check itself
+// failed and the session is still signed in.
+func VerifyAccount(ctx context.Context, client *telegram.Client, phone string) error {
+	self, err := client.Self(ctx)
+	if err != nil {
+		return fmt.Errorf("get self: %w", err)
+	}
+	if samePhone(self.Phone, phone) {
+		return nil
+	}
+	if _, err := client.API().AuthLogOut(ctx); err != nil {
+		return fmt.Errorf("this session belongs to +%s, not %s, and signing it out failed: %w", self.Phone, phone, err)
+	}
+	return fmt.Errorf("%w: this session belongs to +%s, but the account is saved as %s; "+
+		"signed out again — sign in with the right account, or add +%s as a separate account",
+		ErrAccountMismatch, self.Phone, phone, self.Phone)
+}
+
+// samePhone compares phone numbers by their digits, ignoring "+", spaces and
+// other formatting. Numbers without digits never match.
+func samePhone(a, b string) bool {
+	a, b = phoneDigits(a), phoneDigits(b)
+	return a != "" && a == b
+}
+
+func phoneDigits(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r >= '0' && r <= '9' {
+			return r
+		}
+		return -1
+	}, s)
 }
 
 func SignIn(ctx context.Context, client *telegram.Client, phone, code, codeHash, sessionPath string) error {

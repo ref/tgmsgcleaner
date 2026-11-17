@@ -27,6 +27,7 @@ const (
 	authModeChoose = iota
 	authModeCode
 	authModeQR
+	authModeLoading // signed in; verifying the account and loading its chats
 )
 
 // Version is the application version shown in the UI. Local builds show
@@ -75,6 +76,8 @@ type App struct {
 	selfID      int64
 	codeHash    string
 	codeVia     string // where Telegram sent the login code
+	codeSending bool   // a login code request is in flight
+	codeGen     int    // drops the result of an abandoned code request
 	authErr     string
 	authMode    int
 
@@ -82,6 +85,9 @@ type App struct {
 	qrText   string             // rendered QR code for the current login token
 	qrCancel context.CancelFunc // stops the running QR login
 	qrGen    int                // drops messages from a cancelled QR login
+	qrSignIn bool               // the sign-in in progress used a QR code, so the account must be verified
+
+	termWidth, termHeight int // 0 until the first WindowSizeMsg
 
 	screen    int
 	authInput textinput.Model
@@ -145,7 +151,14 @@ type Group struct {
 	myMessages int
 }
 
-type codeSentMsg struct{ codeHash, codeVia string }
+type codeSentMsg struct {
+	codeHash, codeVia string
+	err               error
+	gen               int
+}
+
+// authFailedMsg reports a sign-in that was undone; the user has to start over.
+type authFailedMsg struct{ err error }
 type qrMsg struct {
 	url  string
 	done bool
@@ -337,14 +350,70 @@ func (a App) Init() tea.Cmd {
 	return nil
 }
 
-func (a *App) sendCodeCmd() tea.Cmd {
+func (a *App) sendCodeCmd(gen int) tea.Cmd {
 	return func() tea.Msg {
 		sent, err := tg.SendCode(a.ctx, a.client, a.phone, a.sessionPath)
-		if err != nil {
-			return authErrMsg{err: err}
-		}
-		return codeSentMsg{codeHash: sent.Hash, codeVia: sent.Delivery}
+		return codeSentMsg{codeHash: sent.Hash, codeVia: sent.Delivery, err: err, gen: gen}
 	}
+}
+
+// requestCode asks Telegram for a new login code, abandoning any earlier
+// request.
+func (a *App) requestCode() tea.Cmd {
+	a.codeGen++
+	a.codeSending = true
+	a.codeHash = ""
+	a.codeVia = ""
+	a.authErr = ""
+	a.authInput.SetValue("")
+	return a.sendCodeCmd(a.codeGen)
+}
+
+// signedIn shows the loading screen after a successful sign-in and starts
+// loading the account.
+func (a *App) signedIn() tea.Cmd {
+	a.screen = screenAuth
+	a.authMode = authModeLoading
+	a.authErr = ""
+	a.qrText = ""
+	return a.finishLoginCmd()
+}
+
+// finishLoginCmd loads the chats of a freshly signed-in account. After a QR
+// login it first confirms that the code was scanned by the account this
+// session is saved under.
+func (a *App) finishLoginCmd() tea.Cmd {
+	verify := a.qrSignIn
+	load := a.loadChatsCmd()
+	return func() tea.Msg {
+		if verify {
+			err := tg.VerifyAccount(a.ctx, a.client, a.phone)
+			if errors.Is(err, tg.ErrAccountMismatch) {
+				return authFailedMsg{err: err}
+			}
+			if err != nil {
+				return authErrMsg{err: err}
+			}
+		}
+		return load()
+	}
+}
+
+// resetAuth returns to the sign-in choice with a clean slate and shows why.
+func (a *App) resetAuth(reason string) {
+	a.stopQR()
+	a.qrSignIn = false
+	a.qrText = ""
+	a.codeGen++ // drop the result of a code request still in flight
+	a.codeSending = false
+	a.codeHash = ""
+	a.codeVia = ""
+	a.screen = screenAuth
+	a.authMode = authModeChoose
+	a.authInput.SetValue("")
+	a.authInput.Focus()
+	a.passInput.SetValue("")
+	a.authErr = reason
 }
 
 // startQR begins a QR login, replacing any QR login already running.
@@ -352,6 +421,7 @@ func (a *App) startQR() tea.Cmd {
 	a.stopQR()
 	ctx, cancel := context.WithCancel(a.ctx)
 	a.qrCancel = cancel
+	a.qrSignIn = true
 	a.authMode = authModeQR
 	a.qrText = ""
 	a.authErr = ""
@@ -380,14 +450,18 @@ func waitForQR(ch <-chan tg.QRProgress, gen int) tea.Cmd {
 	}
 }
 
-// renderQR draws a QR code with half-block characters, light modules on a
-// dark terminal background.
+// qrStyle forces white on black so the code scans on any terminal theme:
+// renderQR draws light modules with the foreground color and leaves dark ones
+// as background.
+var qrStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#ffffff")).Background(lipgloss.Color("#000000"))
+
+// renderQR draws a QR code with half-block characters.
 func renderQR(url string) (string, error) {
 	code, err := qrcode.New(url, qrcode.Low)
 	if err != nil {
 		return "", fmt.Errorf("render qr code: %w", err)
 	}
-	return code.ToSmallString(false), nil
+	return qrStyle.Render(strings.TrimRight(code.ToSmallString(false), "\n")), nil
 }
 
 func (a *App) loadChatsCmd() tea.Cmd {
@@ -631,6 +705,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 
 	case tea.WindowSizeMsg:
+		a.termWidth, a.termHeight = msg.Width, msg.Height
 		if a.screen == screenPicker {
 			a.pickerList.SetSize(msg.Width, msg.Height-4)
 		} else {
@@ -642,22 +717,35 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case codeSentMsg:
+		if msg.gen != a.codeGen {
+			return a, nil // from an abandoned code request
+		}
+		a.codeSending = false
+		onCodePath := a.screen == screenAuth && (a.authMode == authModeCode || a.authMode == authModeChoose)
+		if msg.err != nil {
+			// Report the failure only while the user is still on the code
+			// path; they may have moved on to a QR login in the meantime.
+			if onCodePath {
+				a.authMode = authModeChoose
+				a.authErr = msg.err.Error()
+			}
+			return a, nil
+		}
 		a.codeHash = msg.codeHash
 		a.codeVia = msg.codeVia
-		a.authErr = ""
+		if onCodePath {
+			a.authErr = ""
+		}
 		return a, nil
 
 	case authRestartMsg:
 		// Telegram reset the auth flow; the session was already cleared. Return
 		// to the sign-in choice so the user picks a method again.
-		a.screen = screenAuth
-		a.authMode = authModeChoose
-		a.codeHash = ""
-		a.codeVia = ""
-		a.authInput.SetValue("")
-		a.authInput.Focus()
-		a.passInput.SetValue("")
-		a.authErr = "Session was reset — sign in again"
+		a.resetAuth("Session was reset — sign in again")
+		return a, nil
+
+	case authFailedMsg:
+		a.resetAuth(msg.err.Error())
 		return a, nil
 
 	case qrMsg:
@@ -672,22 +760,30 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.qrText = text
 			return a, msg.next
 		}
+		// The login is over either way, so the code on screen is dead.
 		a.stopQR()
+		a.qrText = ""
 		switch {
 		case msg.err == nil:
-			return a, a.loadChatsCmd()
+			cmd := a.signedIn()
+			return a, cmd
 		case errors.Is(msg.err, auth.ErrPasswordAuthNeeded):
 			return a, func() tea.Msg { return needPasswordMsg{} }
-		case errors.Is(msg.err, context.Canceled):
-			return a, nil
 		default:
+			a.qrSignIn = false
 			a.authMode = authModeChoose
 			a.authErr = msg.err.Error()
+			if errors.Is(msg.err, context.Canceled) {
+				// Not the user's esc (that drops the message above): the
+				// client itself stopped.
+				a.authErr = "QR login was interrupted — try again"
+			}
 			return a, nil
 		}
 
 	case authDoneMsg:
-		return a, a.loadChatsCmd()
+		cmd := a.signedIn()
+		return a, cmd
 
 	case chatsLoadedMsg:
 		a.allChats = msg.chats
@@ -904,9 +1000,18 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				case "c":
 					a.authMode = authModeCode
 					a.authErr = ""
-					return a, a.sendCodeCmd()
+					if a.codeHash != "" || a.codeSending {
+						// A code is already sent or on its way; asking again
+						// would burn another one.
+						return a, nil
+					}
+					cmd := a.requestCode()
+					return a, cmd
 				case "r":
-					return a, a.startQR()
+					// Not "return a, a.startQR()": startQR changes a, and Go
+					// does not say whether a is copied before or after the call.
+					cmd := a.startQR()
+					return a, cmd
 				case "q":
 					return a, tea.Quit
 				}
@@ -914,18 +1019,37 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case authModeQR:
 				if msg.String() == "esc" {
 					a.stopQR()
+					a.qrSignIn = false
 					a.authMode = authModeChoose
 					a.authErr = ""
 				}
 				return a, nil
+			case authModeLoading:
+				// Keys only matter once loading has failed.
+				if a.authErr != "" {
+					switch msg.String() {
+					case "enter":
+						a.authErr = ""
+						return a, a.finishLoginCmd()
+					case "q":
+						return a, tea.Quit
+					}
+				}
+				return a, nil
 			case authModeCode:
-				if msg.String() == "esc" {
+				switch msg.String() {
+				case "esc":
+					// Keep the pending code so coming back does not request
+					// another one.
 					a.authMode = authModeChoose
-					a.codeHash = ""
-					a.codeVia = ""
 					a.authErr = ""
-					a.authInput.SetValue("")
 					return a, nil
+				case "ctrl+r":
+					if a.codeSending {
+						return a, nil
+					}
+					cmd := a.requestCode()
+					return a, cmd
 				}
 			}
 		}
@@ -1165,6 +1289,76 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return a, cmd
 }
 
+// authView renders the sign-in screen for the current auth mode.
+func (a App) authView() string {
+	if a.authMode == authModeQR {
+		return a.qrView()
+	}
+	s := appTitle() + "\n\n"
+	switch a.authMode {
+	case authModeChoose:
+		s += fmt.Sprintf("Sign in as %s:\n\n  [c] send a login code\n  [r] scan a QR code with your phone\n  [q] quit\n", a.phone)
+	case authModeCode:
+		s += "Enter your Telegram auth code:\n\n" + a.authInput.View() + "\n"
+		if a.codeHash == "" {
+			s += "\nSending code...\n"
+		} else if a.codeVia != "" {
+			s += "\n" + a.codeVia + "\n"
+		}
+		s += "\n[esc] back  [ctrl+r] send a new code\n"
+	case authModeLoading:
+		if a.authErr == "" {
+			s += "Signed in. Loading your chats...\n"
+		} else {
+			s += "Signed in, but the account could not be loaded.\n\n[enter] try again  [q] quit\n"
+		}
+	}
+	return s + a.authErrView()
+}
+
+func (a App) authErrView() string {
+	if a.authErr == "" {
+		return ""
+	}
+	return "\n⚠️  " + a.authErr + "\n"
+}
+
+// qrView lays out the QR login screen. A clipped QR code cannot be scanned, so
+// on a short terminal it drops the title and spacing, and when even the bare
+// code does not fit it asks for a bigger window instead.
+func (a App) qrView() string {
+	if a.qrText == "" {
+		return appTitle() + "\n\nRequesting QR code...\n\n[esc] back\n" + a.authErrView()
+	}
+	full := appTitle() + "\n\n" + a.qrText + "\n\n" +
+		"On a phone signed in to this account, open\n" +
+		"Settings → Devices → Link Desktop Device and scan the code.\n" +
+		"The code refreshes automatically.\n\n[esc] back\n" + a.authErrView()
+	compact := a.qrText + "\nScan it in Telegram: Settings → Devices · [esc] back"
+	switch {
+	case a.fits(full):
+		return full
+	case a.fits(compact):
+		return compact
+	default:
+		return appTitle() + "\n\n" + fmt.Sprintf(
+			"The terminal window is too small to show the QR code.\n"+
+				"Enlarge it to at least %d columns by %d rows,\n"+
+				"or press [esc] and sign in with a login code.\n",
+			lipgloss.Width(compact), lipgloss.Height(compact))
+	}
+}
+
+// fits reports whether s can be shown without clipping. The terminal size is
+// unknown until the first WindowSizeMsg; until then everything fits.
+func (a App) fits(s string) bool {
+	if a.termHeight == 0 {
+		return true
+	}
+	s = strings.TrimRight(s, "\n")
+	return lipgloss.Height(s) <= a.termHeight && lipgloss.Width(s) <= a.termWidth
+}
+
 func (a App) View() tea.View {
 	var v tea.View
 	v.AltScreen = true
@@ -1182,33 +1376,7 @@ func (a App) View() tea.View {
 		}
 		v.SetContent(s)
 	case screenAuth:
-		s := appTitle() + "\n\n"
-		switch a.authMode {
-		case authModeChoose:
-			s += fmt.Sprintf("Sign in as %s:\n\n  [c] send a login code\n  [r] scan a QR code with your phone\n  [q] quit\n", a.phone)
-		case authModeCode:
-			s += "Enter your Telegram auth code:\n\n" + a.authInput.View() + "\n"
-			if a.codeHash == "" {
-				s += "\nSending code...\n"
-			} else if a.codeVia != "" {
-				s += "\n" + a.codeVia + "\n"
-			}
-			s += "\n[esc] back\n"
-		case authModeQR:
-			if a.qrText == "" {
-				s += "Requesting QR code...\n"
-			} else {
-				s += a.qrText + "\n" +
-					"On a phone signed in to this account, open\n" +
-					"Settings → Devices → Link Desktop Device and scan the code.\n" +
-					"The code refreshes automatically.\n"
-			}
-			s += "\n[esc] back\n"
-		}
-		if a.authErr != "" {
-			s += "\n⚠️  " + a.authErr + "\n"
-		}
-		v.SetContent(s)
+		v.SetContent(a.authView())
 	case screenPassword:
 		s := appTitle() + "\n\nEnter your 2FA password:\n\n" + a.passInput.View() + "\n"
 		if a.authErr != "" {

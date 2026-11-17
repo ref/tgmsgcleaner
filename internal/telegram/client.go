@@ -15,7 +15,17 @@ import (
 // channel signals when a QR login token was accepted on another device.
 func NewClient(apiID int, apiHash string, sessionPath string) (*telegram.Client, qrlogin.LoggedIn) {
 	dispatcher := tg.NewUpdateDispatcher()
-	loggedIn := qrlogin.OnLoginToken(dispatcher)
+	// Buffered, unlike qrlogin.OnLoginToken: the update can arrive while the QR
+	// login is busy refreshing its token, and an unbuffered signal sent at that
+	// moment would be lost.
+	loggedIn := make(chan struct{}, 1)
+	dispatcher.OnLoginToken(func(context.Context, tg.Entities, *tg.UpdateLoginToken) error {
+		select {
+		case loggedIn <- struct{}{}:
+		default:
+		}
+		return nil
+	})
 	opts := telegram.Options{
 		SessionStorage: &session.FileStorage{Path: sessionPath},
 		UpdateHandler:  dispatcher,
